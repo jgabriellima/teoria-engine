@@ -1,0 +1,17 @@
+[Unit]
+Description=teoria-engine LLM inference stack
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=__ENGINE_ROOT__
+ExecStart=__ENGINE_BIN__ up
+ExecStop=__ENGINE_BIN__ down
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

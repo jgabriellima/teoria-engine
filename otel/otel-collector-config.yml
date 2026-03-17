@@ -1,0 +1,33 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+
+exporters:
+  logging:
+    loglevel: info
+
+  # Uncomment and configure to ship to OpenObserve or another backend:
+  # otlphttp:
+  #   endpoint: https://openobserve.example.com/api/default
+  #   headers:
+  #     Authorization: "Basic <base64-encoded-credentials>"
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [logging]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [logging]

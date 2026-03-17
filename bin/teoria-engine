@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENGINE_ROOT="${ENGINE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+COMPOSE_FILE="${ENGINE_ROOT}/docker-compose.yml"
+ENV_FILE="${ENGINE_ROOT}/.env"
+CONFIG_FILE="${ENGINE_ROOT}/config/engine.yml"
+SERVICE_NAME="teoria-engine"
+SYSTEMD_UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
+SYSTEMD_SRC="${ENGINE_ROOT}/systemd/${SERVICE_NAME}.service"
+LOAD_CONFIG="${ENGINE_ROOT}/bin/load-config"
+
+_load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        eval "$(uv run --with pyyaml "$LOAD_CONFIG" "$@")"
+    fi
+}
+
+_compose() {
+    local args=(-f "$COMPOSE_FILE" --project-name "$SERVICE_NAME")
+    [[ -f "$ENV_FILE" ]] && args+=(--env-file "$ENV_FILE")
+    docker compose "${args[@]}" "$@"
+}
+
+cmd_up() {
+    _load_config
+    echo "[teoria-engine] active model: ${ACTIVE_MODEL:-unknown} (${VLLM_MODEL:-unknown})"
+
+    local profiles=()
+    if [[ -f "${ENGINE_ROOT}/cloudflared/tunnel.json" ]]; then
+        profiles+=(--profile tunnel)
+    fi
+    _compose "${profiles[@]}" up -d --build
+    echo "[teoria-engine] running"
+}
+
+cmd_down() {
+    _compose --profile tunnel down
+    echo "[teoria-engine] stopped"
+}
+
+cmd_restart() {
+    cmd_down
+    cmd_up
+}
+
+cmd_logs() {
+    _compose --profile tunnel logs -f --tail="${1:-200}"
+}
+
+cmd_status() {
+    _compose --profile tunnel ps
+}
+
+cmd_health() {
+    _load_config 2>/dev/null || true
+    local port="${GATEWAY_PORT:-9000}"
+    curl -sf "http://localhost:${port}/health" | python3 -m json.tool 2>/dev/null || echo '{"status":"unreachable"}'
+}
+
+cmd_config() {
+    _load_config "$@"
+    echo "=== teoria-engine config ==="
+    echo "  active model : ${ACTIVE_MODEL}"
+    echo "  hf name      : ${VLLM_MODEL}"
+    echo "  max model len : ${VLLM_MAX_MODEL_LEN}"
+    echo "  gpu mem util  : ${VLLM_GPU_MEMORY_UTILIZATION}"
+    echo "  max seqs      : ${VLLM_MAX_NUM_SEQS}"
+    echo "  batch tokens  : ${VLLM_MAX_NUM_BATCHED_TOKENS}"
+    echo "  prefix cache  : ${VLLM_ENABLE_PREFIX_CACHING}"
+    echo "  chunked fill  : ${VLLM_ENABLE_CHUNKED_PREFILL}"
+    echo "  gateway port  : ${GATEWAY_PORT}"
+    echo ""
+    echo "  vllm command  :"
+    echo "    ${VLLM_COMMAND}"
+}
+
+cmd_service_install() {
+    if [[ $EUID -ne 0 ]]; then
+        echo "[error] must run as root to install systemd service" >&2
+        exit 1
+    fi
+    local real_root
+    real_root="$(cd "$ENGINE_ROOT" && pwd)"
+    sed "s|__ENGINE_ROOT__|${real_root}|g; s|__ENGINE_BIN__|${real_root}/bin/teoria-engine|g" \
+        "$SYSTEMD_SRC" > "$SYSTEMD_UNIT"
+    systemctl daemon-reload
+    systemctl enable "$SERVICE_NAME"
+    systemctl start "$SERVICE_NAME"
+    echo "[teoria-engine] systemd service installed and started"
+    systemctl status "$SERVICE_NAME" --no-pager
+}
+
+cmd_service_uninstall() {
+    if [[ $EUID -ne 0 ]]; then
+        echo "[error] must run as root" >&2
+        exit 1
+    fi
+    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+    rm -f "$SYSTEMD_UNIT"
+    systemctl daemon-reload
+    echo "[teoria-engine] systemd service removed"
+}
+
+cmd_preflight() {
+    local ok=true
+    echo "=== teoria-engine preflight ==="
+
+    if ! command -v docker &>/dev/null; then
+        echo "[FAIL] docker not found"; ok=false
+    else
+        echo "[OK]   docker $(docker --version | awk '{print $3}')"
+    fi
+
+    if ! docker compose version &>/dev/null; then
+        echo "[FAIL] docker compose plugin not found"; ok=false
+    else
+        echo "[OK]   docker compose $(docker compose version --short)"
+    fi
+
+    if command -v nvidia-smi &>/dev/null; then
+        echo "[OK]   nvidia-smi detected"
+        nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || true
+    else
+        echo "[WARN] nvidia-smi not found (GPU node?)"
+    fi
+
+    if docker info 2>/dev/null | grep -q nvidia; then
+        echo "[OK]   nvidia container runtime"
+    else
+        echo "[WARN] nvidia runtime not detected in docker"
+    fi
+
+    if [[ ! -f "$ENV_FILE" ]]; then
+        echo "[WARN] .env not found — run: cp .env.example .env"
+    else
+        echo "[OK]   .env present"
+    fi
+
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "[FAIL] config/engine.yml not found"; ok=false
+    else
+        echo "[OK]   config/engine.yml present"
+        _load_config 2>/dev/null && echo "       active model: ${ACTIVE_MODEL} (${VLLM_MODEL})" || true
+    fi
+
+    $ok && echo "=== preflight passed ===" || echo "=== preflight has warnings ==="
+}
+
+cmd_help() {
+    cat <<EOF
+teoria-engine — LLM inference deployment manager
+
+Usage: teoria-engine <command> [options]
+
+Commands:
+  up                    Start all services
+  down                  Stop all services
+  restart               Restart all services
+  logs [N]              Follow logs (last N lines, default 200)
+  status                Show container status
+  health                Check gateway health
+  config [--model X]    Show resolved configuration
+  service               Install as systemd service (requires root)
+  unservice             Remove systemd service (requires root)
+  preflight             Check system prerequisites
+  help                  Show this message
+
+Model override:
+  teoria-engine config --model qwen-0.5b
+EOF
+}
+
+case "${1:-help}" in
+    up)          cmd_up ;;
+    down)        cmd_down ;;
+    restart)     cmd_restart ;;
+    logs)        cmd_logs "${2:-}" ;;
+    status)      cmd_status ;;
+    health)      cmd_health ;;
+    config)      shift; cmd_config "$@" ;;
+    service)     cmd_service_install ;;
+    unservice)   cmd_service_uninstall ;;
+    preflight)   cmd_preflight ;;
+    help|--help) cmd_help ;;
+    *)           echo "[error] unknown command: $1" >&2; cmd_help; exit 1 ;;
+esac

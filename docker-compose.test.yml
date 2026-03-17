@@ -1,0 +1,33 @@
+services:
+
+  vllm:
+    build: ./tests/mock_vllm
+    image: teoria-test-mock-vllm:latest
+    runtime: runc
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=
+    volumes: []
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  gateway:
+    environment:
+      - VLLM_URL=http://vllm:8000
+      - API_KEY=test-key-123
+      - MAX_INPUT_TOKENS=8000
+      - MAX_OUTPUT_TOKENS=2000
+      - MAX_CONCURRENT_REQUESTS=64
+      - OTEL_EXPORTER_OTLP_ENDPOINT=
+
+  nginx:
+    ports:
+      - "8081:80"
+
+  otel-collector:
+    profiles:
+      - disabled

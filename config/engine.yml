@@ -1,0 +1,59 @@
+# =============================================================================
+# teoria-engine configuration
+# =============================================================================
+
+# Which model profile to activate
+active_model: nemotron
+
+# ---------------------------------------------------------------------------
+# Model profiles
+# ---------------------------------------------------------------------------
+models:
+
+  nemotron:
+    hf_name: nvidia/nemotron-3-nano-4b
+    max_model_len: 131072
+    gpu_memory_utilization: 0.95
+    max_num_seqs: 256
+    max_num_batched_tokens: 8192
+    prefix_caching: true
+    chunked_prefill: true
+
+  qwen-0.5b:  # lightweight test/validation profile
+    hf_name: Qwen/Qwen2.5-0.5B-Instruct
+    max_model_len: 4096
+    gpu_memory_utilization: 0.50
+    max_num_seqs: 64
+    max_num_batched_tokens: 2048
+    prefix_caching: true
+    chunked_prefill: false
+
+# ---------------------------------------------------------------------------
+# Gateway
+# ---------------------------------------------------------------------------
+gateway:
+  port: 9000
+  max_input_tokens: 8000
+  max_output_tokens: 2000
+  max_concurrent_requests: 64
+
+# ---------------------------------------------------------------------------
+# NGINX
+# ---------------------------------------------------------------------------
+nginx:
+  rate_limit: "5r/s"
+  burst: 20
+
+# ---------------------------------------------------------------------------
+# Observability
+# ---------------------------------------------------------------------------
+observability:
+  otel_endpoint: "http://otel-collector:4317"
+  service_name: "teoria-engine"
+
+# ---------------------------------------------------------------------------
+# Cloudflare Tunnel
+# ---------------------------------------------------------------------------
+tunnel:
+  name: llm-server
+  hostname: llm.jambu.ai

@@ -1,0 +1,68 @@
+services:
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${VLLM_GPU_DEVICE:-0}
+      - HUGGING_FACE_HUB_TOKEN=${HUGGINGFACE_TOKEN:-}
+    volumes:
+      - huggingface-cache:/root/.cache/huggingface
+    command: ${VLLM_COMMAND:- --model nvidia/nemotron-3-nano-4b --gpu-memory-utilization 0.95 --max-model-len 131072 --max-num-seqs 256 --max-num-batched-tokens 8192 --enable-prefix-caching --enable-chunked-prefill}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: always
+
+  gateway:
+    build: ./gateway
+    environment:
+      - VLLM_URL=http://vllm:8000
+      - API_KEY=${GATEWAY_API_KEY:-CHANGE_ME}
+      - MAX_INPUT_TOKENS=${GATEWAY_MAX_INPUT_TOKENS:-8000}
+      - MAX_OUTPUT_TOKENS=${GATEWAY_MAX_OUTPUT_TOKENS:-2000}
+      - MAX_CONCURRENT_REQUESTS=${GATEWAY_MAX_CONCURRENT_REQUESTS:-64}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_ENDPOINT:-http://otel-collector:4317}
+      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-teoria-engine}
+    ports:
+      - "${GATEWAY_PORT:-9000}:9000"
+    depends_on:
+      vllm:
+        condition: service_healthy
+    restart: always
+
+  nginx:
+    image: nginx:alpine
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - gateway
+    restart: always
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./cloudflared:/etc/cloudflared:ro
+    depends_on:
+      - nginx
+    restart: always
+    profiles:
+      - tunnel
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    volumes:
+      - ./otel/otel-collector-config.yml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    restart: always
+
+volumes:
+  huggingface-cache:

@@ -1,0 +1,7 @@
+tunnel: llm-server
+credentials-file: /etc/cloudflared/tunnel.json
+
+ingress:
+  - hostname: llm.jambu.ai
+    service: http://nginx:80
+  - service: http_status:404

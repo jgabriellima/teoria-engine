@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""
+Parse config/engine.yml and emit shell-compatible environment variables.
+
+Usage (sourced by teoria-engine):
+    eval "$(bin/load-config)"
+    eval "$(bin/load-config --model qwen-0.5b)"   # override active model
+"""
+
+import sys
+import os
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("pyyaml is required: uv pip install pyyaml")
+
+
+def load(config_path: str, model_override: str | None = None) -> dict[str, str]:
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+
+    active = model_override or cfg.get("active_model", "nemotron")
+    model = cfg.get("models", {}).get(active)
+    if not model:
+        available = ", ".join(cfg.get("models", {}).keys())
+        sys.exit(f"model profile '{active}' not found. available: {available}")
+
+    gw = cfg.get("gateway", {})
+    obs = cfg.get("observability", {})
+
+    vllm_flags = [f"--model {model['hf_name']}"]
+    vllm_flags.append(f"--gpu-memory-utilization {model.get('gpu_memory_utilization', 0.95)}")
+    vllm_flags.append(f"--max-model-len {model.get('max_model_len', 131072)}")
+    vllm_flags.append(f"--max-num-seqs {model.get('max_num_seqs', 256)}")
+    vllm_flags.append(f"--max-num-batched-tokens {model.get('max_num_batched_tokens', 8192)}")
+    if model.get("prefix_caching", True):
+        vllm_flags.append("--enable-prefix-caching")
+    if model.get("chunked_prefill", True):
+        vllm_flags.append("--enable-chunked-prefill")
+
+    env = {
+        "ACTIVE_MODEL": active,
+        "VLLM_MODEL": model["hf_name"],
+        "VLLM_COMMAND": " ".join(vllm_flags),
+        "VLLM_GPU_MEMORY_UTILIZATION": str(model.get("gpu_memory_utilization", 0.95)),
+        "VLLM_MAX_MODEL_LEN": str(model.get("max_model_len", 131072)),
+        "VLLM_MAX_NUM_SEQS": str(model.get("max_num_seqs", 256)),
+        "VLLM_MAX_NUM_BATCHED_TOKENS": str(model.get("max_num_batched_tokens", 8192)),
+        "VLLM_ENABLE_PREFIX_CACHING": str(model.get("prefix_caching", True)).lower(),
+        "VLLM_ENABLE_CHUNKED_PREFILL": str(model.get("chunked_prefill", True)).lower(),
+        "GATEWAY_PORT": str(gw.get("port", 9000)),
+        "GATEWAY_MAX_INPUT_TOKENS": str(gw.get("max_input_tokens", 8000)),
+        "GATEWAY_MAX_OUTPUT_TOKENS": str(gw.get("max_output_tokens", 2000)),
+        "GATEWAY_MAX_CONCURRENT_REQUESTS": str(gw.get("max_concurrent_requests", 64)),
+        "OTEL_ENDPOINT": obs.get("otel_endpoint", "http://otel-collector:4317"),
+        "OTEL_SERVICE_NAME": obs.get("service_name", "teoria-engine"),
+    }
+    return env
+
+
+def main():
+    config_path = os.path.join(os.path.dirname(__file__), "..", "config", "engine.yml")
+    config_path = os.path.normpath(config_path)
+
+    model_override = None
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if arg == "--model" and i < len(sys.argv) - 1:
+            model_override = sys.argv[i + 1]
+        elif arg.startswith("--model="):
+            model_override = arg.split("=", 1)[1]
+        elif arg == "--config" and i < len(sys.argv) - 1:
+            config_path = sys.argv[i + 1]
+
+    if not os.path.exists(config_path):
+        sys.exit(f"config not found: {config_path}")
+
+    env = load(config_path, model_override)
+    for key, val in env.items():
+        print(f'export {key}="{val}"')
+
+
+if __name__ == "__main__":
+    main()
