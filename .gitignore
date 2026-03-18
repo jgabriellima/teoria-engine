@@ -1,5 +1,4 @@
 .env
-cloudflared/tunnel.json
 __pycache__/
 *.pyc
 .venv/
@@ -9,5 +8,3 @@ build/
 .mypy_cache/
 .ruff_cache/
 *.log
-
-# cloudflared/tunnel.json
