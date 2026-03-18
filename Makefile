@@ -1,4 +1,4 @@
-.PHONY: up down restart logs status health service unservice preflight build test test-up test-down test-smoke help
+.PHONY: up down restart logs status health service unservice preflight build test test-up test-down test-smoke ssh-copy help
 
 ENGINE := ./bin/teoria-engine
 COMPOSE_TEST := docker compose -f docker-compose.yml -f docker-compose.test.yml --project-name teoria-test
@@ -52,6 +52,24 @@ test: test-up ## Run integration + E2E tests against mock stack
 
 test-smoke: ## Run smoke tests against REAL stack (requires GPU + make up)
 	@uv run --with pytest --with httpx pytest tests/test_smoke.py -v --tb=long
+
+ssh-copy: ## Show public SSH key to add to remote servers
+	@key=""; \
+	for f in ~/.ssh/id_ed25519.pub ~/.ssh/id_rsa.pub ~/.ssh/id_ecdsa.pub; do \
+		if [ -f "$$f" ]; then key="$$f"; break; fi; \
+	done; \
+	if [ -z "$$key" ]; then \
+		echo "No SSH public key found. Generating ed25519 key..."; \
+		ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N "" -q; \
+		key=~/.ssh/id_ed25519.pub; \
+	fi; \
+	echo ""; \
+	echo "Add this key to the remote server's ~/.ssh/authorized_keys:"; \
+	echo "─────────────────────────────────────────────────────────"; \
+	cat "$$key"; \
+	echo "─────────────────────────────────────────────────────────"; \
+	echo ""; \
+	echo "(source: $$key)"
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'

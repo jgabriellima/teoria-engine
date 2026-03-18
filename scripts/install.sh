@@ -33,6 +33,35 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+install_nvidia_container_toolkit() {
+    if ! command -v curl &>/dev/null; then
+        fail "curl is required to install NVIDIA Container Toolkit"
+    fi
+
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+        | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null
+
+    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+        | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+        | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null
+
+    apt-get update -qq && apt-get install -y -qq nvidia-container-toolkit > /dev/null
+
+    nvidia-ctk runtime configure --runtime=docker > /dev/null 2>&1
+
+    if command -v systemctl &>/dev/null && systemctl is-active docker &>/dev/null; then
+        systemctl restart docker
+    else
+        warn "could not restart docker via systemctl — restart docker manually if needed"
+    fi
+
+    if docker info 2>/dev/null | grep -q nvidia; then
+        info "NVIDIA Container Toolkit installed and configured"
+    else
+        warn "NVIDIA Container Toolkit installed but docker may need a manual restart"
+    fi
+}
+
 # --- preflight checks -------------------------------------------------------
 
 info "teoria-engine installer"
@@ -55,7 +84,27 @@ fi
 if docker info 2>/dev/null | grep -q nvidia; then
     info "NVIDIA container runtime detected"
 else
-    warn "NVIDIA container runtime not detected — install: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html"
+    if command -v nvidia-smi &>/dev/null; then
+        info "NVIDIA driver found but container runtime missing — installing NVIDIA Container Toolkit..."
+        install_nvidia_container_toolkit
+    else
+        warn "NVIDIA container runtime not detected (no GPU driver found, skipping toolkit install)"
+    fi
+fi
+
+# --- install uv (needed by load-config) ------------------------------------
+
+if ! command -v uv &>/dev/null; then
+    info "installing uv..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+    if command -v uv &>/dev/null; then
+        info "uv $(uv --version) installed"
+    else
+        warn "uv install succeeded but not found in PATH — add ~/.local/bin to PATH"
+    fi
+else
+    info "uv already installed: $(uv --version)"
 fi
 
 # --- clone / update ----------------------------------------------------------
