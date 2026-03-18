@@ -60,6 +60,12 @@ teoria-engine up               # start everything
 teoria-engine health           # confirm it's running
 ```
 
+**Uninstall:**
+
+```bash
+teoria-engine uninstall       # stops containers, removes volumes, files, and symlink
+```
+
 ## Configuration
 
 All application config lives in `config/engine.yml`. Secrets and hardware-specific values go in `.env`.

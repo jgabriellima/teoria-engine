@@ -105,6 +105,41 @@ cmd_service_uninstall() {
     echo "[teoria-engine] systemd service removed"
 }
 
+cmd_uninstall() {
+    echo "=== teoria-engine uninstall ==="
+    echo ""
+    echo "This will:"
+    echo "  1. Stop and remove all containers and volumes"
+    echo "  2. Remove systemd service (if installed)"
+    echo "  3. Remove /usr/local/bin/teoria-engine symlink"
+    echo "  4. Remove $ENGINE_ROOT"
+    echo ""
+    read -r -p "Are you sure? [y/N] " ans
+    if [[ "${ans,,}" != "y" ]]; then
+        echo "Aborted."
+        return
+    fi
+
+    cmd_down 2>/dev/null || true
+    _compose --profile tunnel down -v --remove-orphans 2>/dev/null || true
+
+    if [[ $EUID -eq 0 ]]; then
+        cmd_service_uninstall 2>/dev/null || true
+    elif systemctl is-enabled "$SERVICE_NAME" &>/dev/null; then
+        echo "[warn] systemd service exists — run with sudo to remove it"
+    fi
+
+    rm -f /usr/local/bin/teoria-engine 2>/dev/null || sudo rm -f /usr/local/bin/teoria-engine 2>/dev/null || true
+
+    if [[ -d "$ENGINE_ROOT" ]]; then
+        rm -rf "$ENGINE_ROOT"
+        echo "[ok] removed $ENGINE_ROOT"
+    fi
+
+    echo ""
+    echo "[teoria-engine] uninstalled"
+}
+
 cmd_preflight() {
     local ok=true
     echo "=== teoria-engine preflight ==="
@@ -166,6 +201,7 @@ Commands:
   config [--model X]    Show resolved configuration
   service               Install as systemd service (requires root)
   unservice             Remove systemd service (requires root)
+  uninstall             Remove everything (containers, volumes, files)
   preflight             Check system prerequisites
   help                  Show this message
 
@@ -185,6 +221,7 @@ case "${1:-help}" in
     service)     cmd_service_install ;;
     unservice)   cmd_service_uninstall ;;
     preflight)   cmd_preflight ;;
+    uninstall)   cmd_uninstall ;;
     help|--help) cmd_help ;;
     *)           echo "[error] unknown command: $1" >&2; cmd_help; exit 1 ;;
 esac
