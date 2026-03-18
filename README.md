@@ -317,12 +317,3 @@ sudo teoria-engine unservice    # stop + disable + remove
 ## License
 
 MIT — Jambu.ai
-
-
-
-curl https://llm.jambu.ai/api/v1/chat -H "Authorization: Bearer default" -H "Content-Type: application/json" -d '{
-  "model": "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16",
-  "temperature": 0,
-  "system_prompt": "Solve the problem step-by-step and give the final numeric answer.",
-  "input": "Find the three-digit number N such that: (1) the sum of its digits is 15, (2) the digits are in strictly increasing order, and (3) the number is divisible by 9."
-}'
