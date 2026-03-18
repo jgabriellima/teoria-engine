@@ -39,20 +39,20 @@ Five Docker Compose services: `vllm`, `gateway`, `nginx`, `cloudflared` (opt-in 
 **One-line install:**
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/jambu/teoria-llm-engine/main/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/jgabriellima/teoria-engine/main/scripts/install.sh | bash
 ```
 
 Or with options:
 
 ```bash
-curl -sSL ... | bash -s -- --install-dir /opt/teoria-engine --service
+curl -sSL https://raw.githubusercontent.com/jgabriellima/teoria-engine/main/scripts/install.sh | bash -s -- --install-dir /opt/teoria-engine --service
 ```
 
 **Manual setup:**
 
 ```bash
-git clone https://github.com/jambu/teoria-llm-engine.git
-cd teoria-llm-engine
+git clone https://github.com/jgabriellima/teoria-engine.git /opt/teoria-engine
+cd /opt/teoria-engine
 
 cp .env.example .env          # set GATEWAY_API_KEY and HUGGINGFACE_TOKEN
 teoria-engine preflight        # verify GPU, docker, nvidia runtime
@@ -310,4 +310,5 @@ sudo teoria-engine unservice    # stop + disable + remove
 
 ## License
 
-Proprietary — Jambu.
+MIT — Jambu.ai
+

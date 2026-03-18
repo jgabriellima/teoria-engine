@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ENGINE_ROOT="${ENGINE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+[[ -L "$SCRIPT_PATH" ]] && SCRIPT_PATH="$(readlink -f "$SCRIPT_PATH")"
+ENGINE_ROOT="${ENGINE_ROOT:-$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)}"
 COMPOSE_FILE="${ENGINE_ROOT}/docker-compose.yml"
 ENV_FILE="${ENGINE_ROOT}/.env"
 CONFIG_FILE="${ENGINE_ROOT}/config/engine.yml"

@@ -56,14 +56,32 @@ services:
     profiles:
       - tunnel
 
+  openobserve:
+    image: public.ecr.aws/zinclabs/openobserve:latest
+    environment:
+      - ZO_ROOT_USER_EMAIL=${OBS_USER:-admin@teoria.ai}
+      - ZO_ROOT_USER_PASSWORD=${OBS_PASSWORD:-teoria-obs-2026}
+      - ZO_DATA_DIR=/data
+    volumes:
+      - openobserve-data:/data
+    ports:
+      - "5080:5080"
+      - "5081:5081"
+    restart: always
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
+    environment:
+      - OBS_OTEL_AUTH=${OBS_OTEL_AUTH:-}
     volumes:
       - ./otel/otel-collector-config.yml:/etc/otelcol-contrib/config.yaml:ro
     ports:
       - "4317:4317"
       - "4318:4318"
+    depends_on:
+      - openobserve
     restart: always
 
 volumes:
   huggingface-cache:
+  openobserve-data:

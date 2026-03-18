@@ -10,7 +10,7 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-REPO_URL="${TEORIA_REPO:-https://github.com/jambu/teoria-llm-engine.git}"
+REPO_URL="${TEORIA_REPO:-https://github.com/jgabriellima/teoria-engine.git}"
 BRANCH="${TEORIA_BRANCH:-main}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/teoria-engine}"
 INSTALL_SERVICE=false

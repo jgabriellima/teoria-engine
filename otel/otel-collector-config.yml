@@ -11,23 +11,31 @@ processors:
     timeout: 5s
     send_batch_size: 1024
 
-exporters:
-  logging:
-    loglevel: info
+  resourcedetection:
+    detectors: [env, system]
+    timeout: 5s
 
-  # Uncomment and configure to ship to OpenObserve or another backend:
-  # otlphttp:
-  #   endpoint: https://openobserve.example.com/api/default
-  #   headers:
-  #     Authorization: "Basic <base64-encoded-credentials>"
+exporters:
+  debug:
+    verbosity: basic
+
+  otlphttp/openobserve:
+    endpoint: http://openobserve:5080/api/default
+    headers:
+      Authorization: "Basic ${OBS_OTEL_AUTH}"
+      stream-name: teoria-engine
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [batch]
-      exporters: [logging]
+      processors: [resourcedetection, batch]
+      exporters: [otlphttp/openobserve, debug]
     metrics:
       receivers: [otlp]
-      processors: [batch]
-      exporters: [logging]
+      processors: [resourcedetection, batch]
+      exporters: [otlphttp/openobserve, debug]
+    logs:
+      receivers: [otlp]
+      processors: [resourcedetection, batch]
+      exporters: [otlphttp/openobserve, debug]

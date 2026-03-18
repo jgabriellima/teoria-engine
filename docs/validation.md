@@ -29,7 +29,7 @@ Spins up a mock vLLM + real gateway + real NGINX, runs 19 tests, tears down.
 ### 2. Install
 
 ```bash
-git clone https://github.com/jambu/teoria-llm-engine.git /opt/teoria-engine
+git clone https://github.com/jgabriellima/teoria-engine.git /opt/teoria-engine
 cd /opt/teoria-engine
 cp .env.example .env
 ```
