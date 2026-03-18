@@ -1,6 +1,6 @@
 # Engineering Deployment Guide
 
-## Production Serving of `nvidia/nemotron-3-nano-4b`
+## Production Serving of `nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16`
 
 ---
 
@@ -142,7 +142,7 @@ services:
 
     command: >
 
-      --model nvidia/nemotron-3-nano-4b
+      --model nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16
       --gpu-memory-utilization 0.95
       --max-model-len 131072
       --max-num-seqs 256

@@ -2,7 +2,7 @@
 
 Production-grade LLM inference stack for single GPU nodes. Orchestrates vLLM, a FastAPI gateway, NGINX reverse proxy, and optional Cloudflare tunnel — all managed through a single CLI.
 
-Default model: **nvidia/nemotron-3-nano-4b** (~31.6B params, ~3.6B active per token via MoE).
+Default model: **nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16** (~31.6B params, ~3.6B active per token via MoE).
 
 ## Architecture
 
@@ -79,7 +79,8 @@ active_model: nemotron
 
 models:
   nemotron:
-    hf_name: nvidia/nemotron-3-nano-4b
+    hf_name: nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16
+    trust_remote_code: true
     max_model_len: 131072
     gpu_memory_utilization: 0.95
     max_num_seqs: 256
@@ -128,58 +129,115 @@ make preflight     make service       make build
 
 ## API Usage
 
-The gateway exposes an OpenAI-compatible API on port 9000 (configurable).
+The gateway exposes an OpenAI-compatible API on port 9000 (configurable). With the Cloudflare tunnel active, the public URL is `https://llm.jambu.ai`.
 
 ```bash
+# Via public URL (with tunnel)
+curl https://llm.jambu.ai/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_tokens": 512
+  }'
+
+# Via localhost (direct / SSH tunnel)
 curl http://localhost:9000/v1/chat/completions \
   -H "x-api-key: YOUR_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "nvidia/nemotron-3-nano-4b",
     "messages": [{"role": "user", "content": "Hello"}],
     "max_tokens": 512
   }'
 ```
 
-Streaming:
+Streaming (OpenAI-compatible):
 
 ```bash
-curl http://localhost:9000/v1/chat/completions \
-  -H "x-api-key: YOUR_KEY" \
+curl -N https://llm.jambu.ai/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "nvidia/nemotron-3-nano-4b",
     "messages": [{"role": "user", "content": "Hello"}],
     "max_tokens": 512,
     "stream": true
   }'
 ```
 
-Auth accepts either `x-api-key` header or `Authorization: Bearer <key>`. The `/health` endpoint requires no authentication.
+Streaming (simplified API):
+
+```bash
+curl -N https://llm.jambu.ai/api/v1/chat \
+  -H "Authorization: Bearer YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": "Count from 1 to 10, one per line",
+    "max_tokens": 100,
+    "stream": true
+  }'
+```
+
+Auth accepts either `x-api-key` header or `Authorization: Bearer <key>`. The `/health` endpoint requires no authentication. The model field is optional — the gateway resolves it to the active model automatically.
+
+### Simplified API (`/api/v1/chat`)
+
+Task-oriented contract with `system_prompt` + `input`:
+
+```bash
+curl https://llm.jambu.ai/api/v1/chat \
+  -H "Authorization: Bearer YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": "Compute exactly: 93847 × 76429",
+    "system_prompt": "Compute the exact result. Show reasoning and then provide the final integer.",
+    "temperature": 0,
+    "max_tokens": 512
+  }'
+```
+
+| Field          | Type    | Required | Default | Description                    |
+|----------------|---------|----------|---------|--------------------------------|
+| `input`        | string  | yes      | —       | User prompt                    |
+| `system_prompt`| string  | no       | —       | System instruction              |
+| `model`        | string  | no       | —       | Model ID (uses server default) |
+| `temperature`  | float   | no       | 0.7     | Sampling temperature (0–2)     |
+| `max_tokens`   | int     | no       | 2048    | Max completion tokens          |
+| `stream`       | boolean | no       | false   | Stream response                |
 
 ## Cloudflare Tunnel (Public Exposure)
 
 To expose the stack to the internet without opening router ports:
 
-1. Provision a tunnel and DNS route (one-time, from a controlled machine):
+1. **One-time provisioning** (run locally on a machine with `cloudflared` and browser for login):
 
 ```bash
+bin/setup-tunnel
+```
+
+This installs `cloudflared/config.yml` from `config/engine.yml` (tunnel section) — the config is versioned with the project. Then it provisions the tunnel and copies credentials.
+
+Or manually:
+
+```bash
+cloudflared tunnel login
 cloudflared tunnel create llm-server
 cloudflared tunnel route dns llm-server llm.jambu.ai
+# Copy ~/.cloudflared/<tunnel-id>.json to cloudflared/tunnel.json
+# Or: bin/setup-tunnel --credentials ~/.cloudflared/<tunnel-id>.json
 ```
 
-2. Place the credentials in the project:
+2. **Deploy to VM**: copy `cloudflared/tunnel.json` securely (e.g. `scp`) to the VM at `/opt/teoria-engine/cloudflared/`. The tunnel starts automatically with `make up`.
 
-```
-cloudflared/
-  ├── config.yml      # ingress rules
-  └── tunnel.json     # credentials (secret — never commit)
-```
-
-3. The `cloudflared` service activates automatically when `cloudflared/tunnel.json` exists:
+3. The `cloudflared` service activates when `cloudflared/tunnel.json` exists:
 
 ```bash
 teoria-engine up     # detects tunnel.json → starts cloudflared profile
+```
+
+4. **Test**:
+
+```bash
+curl -s https://llm.jambu.ai/health
 ```
 
 ## Observability
@@ -216,7 +274,8 @@ sudo teoria-engine unservice    # stop + disable + remove
 ```
 ├── bin/
 │   ├── teoria-engine        # main CLI
-│   └── load-config          # YAML → shell env parser
+│   ├── load-config          # YAML → shell env parser
+│   └── setup-tunnel         # Cloudflare tunnel one-time provisioning
 ├── config/
 │   └── engine.yml           # model profiles and stack config
 ├── gateway/
@@ -245,6 +304,7 @@ sudo teoria-engine unservice    # stop + disable + remove
 ├── .env.example
 └── docs/
     ├── architecture.md
+    ├── tunnel-deploy.md
     └── validation.md
 ```
 

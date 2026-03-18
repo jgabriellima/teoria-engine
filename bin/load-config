@@ -30,6 +30,8 @@ def load(config_path: str, model_override: str | None = None) -> dict[str, str]:
     obs = cfg.get("observability", {})
 
     vllm_flags = [f"--model {model['hf_name']}"]
+    if model.get("trust_remote_code", False):
+        vllm_flags.append("--trust-remote-code")
     vllm_flags.append(f"--gpu-memory-utilization {model.get('gpu_memory_utilization', 0.95)}")
     vllm_flags.append(f"--max-model-len {model.get('max_model_len', 131072)}")
     vllm_flags.append(f"--max-num-seqs {model.get('max_num_seqs', 256)}")
@@ -59,9 +61,38 @@ def load(config_path: str, model_override: str | None = None) -> dict[str, str]:
     return env
 
 
+def write_cloudflared_config(config_path: str, out_path: str) -> None:
+    """Generate cloudflared/config.yml from config/engine.yml tunnel section."""
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+    tunnel = cfg.get("tunnel", {})
+    tunnel_ref = tunnel.get("id") or tunnel.get("name", "llm-server")
+    hostname = tunnel.get("hostname", "llm.jambu.ai")
+    content = f"""# Generated from config/engine.yml tunnel section — version with project
+tunnel: {tunnel_ref}
+credentials-file: /etc/cloudflared/tunnel.json
+
+ingress:
+  - hostname: {hostname}
+    service: http://nginx:80
+  - service: http_status:404
+"""
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w") as f:
+        f.write(content)
+
+
 def main():
-    config_path = os.path.join(os.path.dirname(__file__), "..", "config", "engine.yml")
-    config_path = os.path.normpath(config_path)
+    root = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+    config_path = os.path.join(root, "config", "engine.yml")
+    cloudflared_config = os.path.join(root, "cloudflared", "config.yml")
+
+    if "install-cloudflared-config" in sys.argv:
+        if not os.path.exists(config_path):
+            sys.exit(f"config not found: {config_path}")
+        write_cloudflared_config(config_path, cloudflared_config)
+        print(f"[ok] wrote {cloudflared_config}")
+        return
 
     model_override = None
     for i, arg in enumerate(sys.argv[1:], 1):

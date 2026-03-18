@@ -8,7 +8,7 @@ services:
       - HUGGING_FACE_HUB_TOKEN=${HUGGINGFACE_TOKEN:-}
     volumes:
       - huggingface-cache:/root/.cache/huggingface
-    command: ${VLLM_COMMAND:- --model nvidia/nemotron-3-nano-4b --gpu-memory-utilization 0.95 --max-model-len 131072 --max-num-seqs 256 --max-num-batched-tokens 8192 --enable-prefix-caching --enable-chunked-prefill}
+    command: ${VLLM_COMMAND:- --model nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16 --trust-remote-code --gpu-memory-utilization 0.95 --max-model-len 131072 --max-num-seqs 256 --max-num-batched-tokens 8192 --enable-prefix-caching --enable-chunked-prefill}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -21,6 +21,7 @@ services:
     build: ./gateway
     environment:
       - VLLM_URL=http://vllm:8000
+      - VLLM_MODEL=${VLLM_MODEL:-}
       - API_KEY=${GATEWAY_API_KEY:-CHANGE_ME}
       - MAX_INPUT_TOKENS=${GATEWAY_MAX_INPUT_TOKENS:-8000}
       - MAX_OUTPUT_TOKENS=${GATEWAY_MAX_OUTPUT_TOKENS:-2000}

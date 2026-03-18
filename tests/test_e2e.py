@@ -15,7 +15,6 @@ class TestE2EFullStack:
         r = client.post(
             f"{nginx_url}/v1/chat/completions",
             json={
-                "model": "nvidia/nemotron-3-nano-4b",
                 "messages": [{"role": "user", "content": "What is 2+2?"}],
                 "max_tokens": 100,
             },
@@ -33,7 +32,6 @@ class TestE2EFullStack:
                 "POST",
                 f"{nginx_url}/v1/chat/completions",
                 json={
-                    "model": "nvidia/nemotron-3-nano-4b",
                     "messages": [{"role": "user", "content": "Count to 3"}],
                     "stream": True,
                 },

@@ -1,4 +1,5 @@
-tunnel: llm-server
+# Generated from config/engine.yml tunnel section — version with project
+tunnel: a550eb52-0f87-4334-aa9e-2bd857968f99
 credentials-file: /etc/cloudflared/tunnel.json
 
 ingress:

@@ -1,10 +1,10 @@
 import os
 import asyncio
 from contextlib import asynccontextmanager
-
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -12,6 +12,7 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExport
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 VLLM_URL = os.getenv("VLLM_URL", "http://vllm:8000")
+VLLM_MODEL = os.getenv("VLLM_MODEL", "")
 API_KEY = os.getenv("API_KEY", "CHANGE_ME")
 MAX_INPUT_TOKENS = int(os.getenv("MAX_INPUT_TOKENS", "8000"))
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "2000"))
@@ -62,18 +63,76 @@ def _validate_payload(payload: dict) -> str | None:
     return None
 
 
+def _resolve_model_for_vllm(payload: dict) -> dict:
+    """Rewrite model field so vLLM receives HF ID, not profile name."""
+    out = dict(payload)
+    out["model"] = VLLM_MODEL or payload.get("model") or ""
+    return out
+
+
+class ChatRequest(BaseModel):
+    """Simplified chat contract: system_prompt + input."""
+
+    input: str = Field(..., min_length=1, description="User input / prompt")
+    model: str | None = Field(None, description="Model ID (optional, uses server default)")
+    system_prompt: str | None = Field(None, description="System instruction")
+    temperature: float = Field(0.7, ge=0, le=2, description="Sampling temperature")
+    max_tokens: int = Field(
+        min(2048, MAX_OUTPUT_TOKENS), ge=1, le=MAX_OUTPUT_TOKENS, description="Max completion tokens"
+    )
+    stream: bool = Field(False, description="Stream response")
+
+
+def _chat_request_to_openai(payload: ChatRequest) -> dict:
+    """Transform simplified contract to OpenAI/vLLM format."""
+    messages = []
+    if payload.system_prompt:
+        messages.append({"role": "system", "content": payload.system_prompt})
+    messages.append({"role": "user", "content": payload.input})
+
+    body: dict = {
+        "messages": messages,
+        "max_tokens": payload.max_tokens,
+        "temperature": payload.temperature,
+        "stream": payload.stream,
+    }
+    # vLLM expects HF model ID; resolve profile name via VLLM_MODEL
+    body["model"] = VLLM_MODEL or payload.model or ""
+    return body
+
+
+@app.post("/api/v1/chat")
+async def api_chat(payload: ChatRequest):
+    """
+    Simplified chat API: system_prompt + input.
+    Proxies to vLLM OpenAI-compatible endpoint.
+    """
+    if err := _validate_payload(payload.model_dump()):
+        return JSONResponse({"error": err}, status_code=400)
+
+    vllm_payload = _chat_request_to_openai(payload)
+
+    async with _semaphore:
+        with tracer.start_as_current_span("llm_request"):
+            if payload.stream:
+                return await _stream_response(vllm_payload)
+            resp = await _http.post("/v1/chat/completions", json=vllm_payload)
+            return JSONResponse(resp.json(), status_code=resp.status_code)
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     payload = await request.json()
     if err := _validate_payload(payload):
         return JSONResponse({"error": err}, status_code=400)
 
+    vllm_payload = _resolve_model_for_vllm(payload)
     async with _semaphore:
         with tracer.start_as_current_span("llm_request"):
-            stream = payload.get("stream", False)
+            stream = vllm_payload.get("stream", False)
             if stream:
-                return await _stream_response(payload)
-            resp = await _http.post("/v1/chat/completions", json=payload)
+                return await _stream_response(vllm_payload)
+            resp = await _http.post("/v1/chat/completions", json=vllm_payload)
             return JSONResponse(resp.json(), status_code=resp.status_code)
 
 
@@ -99,9 +158,10 @@ async def chat_simple(request: Request):
     if err := _validate_payload(payload):
         return JSONResponse({"error": err}, status_code=400)
 
+    vllm_payload = _resolve_model_for_vllm(payload)
     async with _semaphore:
         with tracer.start_as_current_span("llm_request"):
-            resp = await _http.post("/v1/chat/completions", json=payload)
+            resp = await _http.post("/v1/chat/completions", json=vllm_payload)
             return JSONResponse(resp.json(), status_code=resp.status_code)
 
 

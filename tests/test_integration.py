@@ -120,3 +120,49 @@ class TestGatewayChatCompletion:
         )
         assert r.status_code == 200
         assert "choices" in r.json()
+
+
+class TestApiV1Chat:
+    """Simplified contract: system_prompt + input."""
+
+    def test_basic_input(self, client, gateway_url, authed_headers):
+        r = client.post(
+            f"{gateway_url}/api/v1/chat",
+            json={"input": "What is 2+2? Reply with just the number."},
+            headers=authed_headers,
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert "choices" in body
+        assert len(body["choices"][0]["message"]["content"]) > 0
+
+    def test_system_prompt_and_input(self, client, gateway_url, authed_headers):
+        r = client.post(
+            f"{gateway_url}/api/v1/chat",
+            json={
+                "input": "Compute exactly: 2 + 2",
+                "system_prompt": "Compute the exact result. Show reasoning and then provide the final integer.",
+                "temperature": 0,
+                "max_tokens": 64,
+            },
+            headers=authed_headers,
+        )
+        assert r.status_code == 200
+        body = r.json()
+        content = body["choices"][0]["message"]["content"]
+        assert "4" in content or "four" in content.lower()
+
+    def test_requires_auth(self, client, gateway_url):
+        r = client.post(
+            f"{gateway_url}/api/v1/chat",
+            json={"input": "hi"},
+        )
+        assert r.status_code == 401
+
+    def test_empty_input_rejected(self, client, gateway_url, authed_headers):
+        r = client.post(
+            f"{gateway_url}/api/v1/chat",
+            json={"input": ""},
+            headers=authed_headers,
+        )
+        assert r.status_code == 422

@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Cloudflare Tunnel one-time provisioning for teoria-engine
+# =============================================================================
+# Run this on a machine with cloudflared installed and browser access (login).
+# The tunnel credentials are then copied to cloudflared/tunnel.json for use
+# by the Docker cloudflared service.
+#
+# Prerequisites:
+#   - Domain jambu.ai (or your hostname) in Cloudflare
+#   - cloudflared installed: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-local-tunnel/
+#
+# Usage:
+#   bin/setup-tunnel                    # interactive provisioning
+#   bin/setup-tunnel --credentials PATH # copy existing credentials only
+# =============================================================================
+
+set -euo pipefail
+
+ENGINE_ROOT="${ENGINE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+CLOUDFLARED_DIR="${ENGINE_ROOT}/cloudflared"
+CREDENTIALS_DEST="${CLOUDFLARED_DIR}/tunnel.json"
+TUNNEL_NAME="llm-server"
+HOSTNAME="llm.jambu.ai"
+
+usage() {
+    cat <<EOF
+Usage: $0 [OPTIONS]
+
+One-time provisioning of Cloudflare Tunnel for teoria-engine.
+
+Options:
+  --credentials PATH   Copy existing credentials file to cloudflared/tunnel.json
+  --help               Show this help
+
+Without options, runs interactive provisioning:
+  1. cloudflared tunnel login
+  2. cloudflared tunnel create $TUNNEL_NAME
+  3. cloudflared tunnel route dns $TUNNEL_NAME $HOSTNAME
+  4. Copy credentials to $CREDENTIALS_DEST
+EOF
+}
+
+copy_credentials() {
+    local src="$1"
+    if [[ ! -f "$src" ]]; then
+        echo "[error] credentials file not found: $src" >&2
+        exit 1
+    fi
+    if ! python3 -c "import json; json.load(open('$src'))" 2>/dev/null; then
+        echo "[error] invalid JSON: $src" >&2
+        exit 1
+    fi
+    mkdir -p "$CLOUDFLARED_DIR"
+    cp "$src" "$CREDENTIALS_DEST"
+    chmod 600 "$CREDENTIALS_DEST"
+    echo "[ok] credentials copied to $CREDENTIALS_DEST"
+}
+
+if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
+    usage
+    exit 0
+fi
+
+if [[ "${1:-}" == "--credentials" ]]; then
+    if [[ -z "${2:-}" ]]; then
+        echo "[error] --credentials requires PATH" >&2
+        exit 1
+    fi
+    copy_credentials "$2"
+    echo ""
+    echo "Next: run 'make up' (or teoria-engine up) to start the stack with the tunnel."
+    exit 0
+fi
+
+# -----------------------------------------------------------------------------
+# Interactive provisioning
+# -----------------------------------------------------------------------------
+
+if [[ ! -x "$(command -v cloudflared 2>/dev/null)" ]]; then
+    echo "[error] cloudflared not found. Install it first:"
+    echo "  Ubuntu/Debian: sudo apt-get install cloudflared"
+    echo "  macOS:         brew install cloudflared"
+    echo "  Or:            https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-local-tunnel/"
+    exit 1
+fi
+
+if [[ -f "$CREDENTIALS_DEST" ]]; then
+    echo "[info] tunnel.json already exists. To re-provision, remove it first:"
+    echo "  rm $CREDENTIALS_DEST"
+    read -r -p "Overwrite? [y/N] " ans
+    if [[ "${ans,,}" != "y" ]]; then
+        echo "Aborted."
+        exit 0
+    fi
+fi
+
+echo "=== Cloudflare Tunnel provisioning for $TUNNEL_NAME ==="
+echo ""
+
+# Read tunnel name/hostname from config/engine.yml (single source of truth)
+TUNNEL_NAME=$(python3 -c "
+import yaml
+with open('$ENGINE_ROOT/config/engine.yml') as f: c=yaml.safe_load(f)
+print(c.get('tunnel',{}).get('name','llm-server'))
+" 2>/dev/null) || TUNNEL_NAME="llm-server"
+HOSTNAME=$(python3 -c "
+import yaml
+with open('$ENGINE_ROOT/config/engine.yml') as f: c=yaml.safe_load(f)
+print(c.get('tunnel',{}).get('hostname','llm.jambu.ai'))
+" 2>/dev/null) || HOSTNAME="llm.jambu.ai"
+
+echo "[0/5] Install cloudflared/config.yml from config/engine.yml (versioned)..."
+if uv run --with pyyaml "$ENGINE_ROOT/bin/load-config" install-cloudflared-config 2>/dev/null; then
+    : # ok
+elif python3 "$ENGINE_ROOT/bin/load-config" install-cloudflared-config 2>/dev/null; then
+    : # ok (pyyaml must be installed)
+else
+    echo "[warn] could not generate config; ensure cloudflared/config.yml exists"
+fi
+
+echo "[1/5] Login to Cloudflare (opens browser)..."
+cloudflared tunnel login
+
+echo ""
+echo "[2/5] Create tunnel '$TUNNEL_NAME'..."
+cloudflared tunnel create "$TUNNEL_NAME"
+
+# Credentials written to ~/.cloudflared/<tunnel-id>.json; use newest (exclude cert.pem)
+cred_path=$(ls -t "$HOME/.cloudflared"/*.json 2>/dev/null | head -1)
+if [[ -z "$cred_path" ]] || [[ ! -f "$cred_path" ]]; then
+    echo "[error] could not find credentials in ~/.cloudflared/. Create tunnel manually, then run:"
+    echo "  $0 --credentials ~/.cloudflared/<tunnel-id>.json"
+    exit 1
+fi
+
+echo ""
+echo "[3/5] Route DNS: $TUNNEL_NAME -> $HOSTNAME..."
+cloudflared tunnel route dns "$TUNNEL_NAME" "$HOSTNAME"
+
+echo ""
+echo "[4/5] Copy credentials to project..."
+copy_credentials "$cred_path"
+
+echo ""
+echo "=== Done ==="
+echo ""
+echo "Start the stack with tunnel:"
+echo "  make up"
+echo ""
+echo "Test:"
+echo "  curl -s https://$HOSTNAME/health"
+echo "  curl -s -X POST https://$HOSTNAME/api/v1/chat -H 'Content-Type: application/json' -H 'Authorization: Bearer \$API_KEY' -d '{\"input\":\"Hi\",\"stream\":false}'"
+echo ""
+echo "To deploy to VM: copy cloudflared/tunnel.json securely (scp, secrets manager)."

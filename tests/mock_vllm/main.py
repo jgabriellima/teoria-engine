@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 app = FastAPI(title="mock-vllm")
 
-MODEL_NAME = "nvidia/nemotron-3-nano-4b"
+MODEL_NAME = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
 
 
 def _completion_response(content: str, usage: dict) -> dict:

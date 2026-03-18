@@ -11,7 +11,8 @@ active_model: nemotron
 models:
 
   nemotron:
-    hf_name: nvidia/nemotron-3-nano-4b
+    hf_name: nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16
+    trust_remote_code: true
     max_model_len: 131072
     gpu_memory_utilization: 0.95
     max_num_seqs: 256
@@ -55,5 +56,6 @@ observability:
 # Cloudflare Tunnel
 # ---------------------------------------------------------------------------
 tunnel:
+  id: a550eb52-0f87-4334-aa9e-2bd857968f99
   name: llm-server
   hostname: llm.jambu.ai
