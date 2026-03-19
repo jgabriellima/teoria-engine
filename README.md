@@ -1,38 +1,55 @@
 # teoria-engine
 
-Production-grade LLM inference stack for single GPU nodes. Orchestrates vLLM, a FastAPI gateway, NGINX reverse proxy, and optional Cloudflare tunnel — all managed through a single CLI.
+Production-grade LLM inference stack. Runs on Linux with NVIDIA GPUs (via vLLM) or macOS Apple Silicon (via MLX). Orchestrates the LLM backend, a FastAPI gateway, NGINX reverse proxy, and optional Cloudflare tunnel — all managed through a single CLI.
 
 Default model: **nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16** (~31.6B params, ~3.6B active per token via MoE).
 
 ## Architecture
 
 ```
-Internet
-   │
-Cloudflare Tunnel (optional)
-   │
-NGINX  ──  rate limiting, streaming
-   │
-Gateway (FastAPI)  ──  auth, concurrency control, telemetry
-   │
-vLLM  ──  continuous batching, PagedAttention, prefix caching
-   │
-GPU
+                  Linux + NVIDIA GPU                macOS Apple Silicon
+                  ─────────────────                 ───────────────────
+
+                  Internet                          localhost
+                     │                                 │
+                  Cloudflare Tunnel (opt)            NGINX (Docker)
+                     │                                 │
+                  NGINX (Docker)                    Gateway (Docker)
+                     │                                 │
+                  Gateway (Docker)                  MLX server (native)
+                     │                                 │
+                  vLLM (Docker, CUDA)               Metal GPU
+                     │
+                  GPU
 ```
 
-Five Docker Compose services: `vllm`, `gateway`, `nginx`, `cloudflared` (opt-in profile), `otel-collector`.
+Docker services: `gateway`, `nginx`, `openobserve`, `otel-collector`, `cloudflared` (opt-in profile), `vllm` (gpu profile, Linux only).
+
+On macOS, the MLX server runs natively (Docker can't access Metal GPUs). The gateway inside Docker connects to it via `host.docker.internal`.
 
 ## Requirements
+
+### Linux (production)
 
 | Component | Minimum |
 |---|---|
 | GPU | RTX 4090 / RTX 6000 / A100 (24 GB+ VRAM) |
 | RAM | 64 GB |
 | Disk | NVMe SSD |
-| OS | Ubuntu 22.04 |
+| OS | Ubuntu 22.04+ |
 | CUDA | 12.4+ |
 | Docker | Docker Engine + Compose plugin |
 | Runtime | NVIDIA Container Toolkit |
+
+### macOS (development)
+
+| Component | Minimum |
+|---|---|
+| Chip | Apple Silicon (M1 / M2 / M3 / M4) |
+| RAM | 16 GB (32 GB+ recommended) |
+| OS | macOS 13+ |
+| Docker | Docker Desktop |
+| Python | 3.10+ with `mlx-lm` |
 
 ## Quick Start
 
@@ -48,6 +65,8 @@ Or with options:
 curl -sSL https://raw.githubusercontent.com/jgabriellima/teoria-engine/main/scripts/install.sh | bash -s -- --install-dir /opt/teoria-engine --service
 ```
 
+The installer auto-detects the platform, installs dependencies (`uv`, `mlx-lm` on Mac, NVIDIA Container Toolkit on Linux), and configures everything.
+
 **Manual setup:**
 
 ```bash
@@ -55,7 +74,7 @@ git clone https://github.com/jgabriellima/teoria-engine.git /opt/teoria-engine
 cd /opt/teoria-engine
 
 cp .env.example .env          # set GATEWAY_API_KEY and HUGGINGFACE_TOKEN
-teoria-engine preflight        # verify GPU, docker, nvidia runtime
+teoria-engine preflight        # verify platform, GPU, docker
 teoria-engine up               # start everything
 teoria-engine health           # confirm it's running
 ```
@@ -80,12 +99,15 @@ VLLM_GPU_DEVICE=0
 
 ### config/engine.yml (model profiles)
 
+Each profile defines models for both platforms:
+
 ```yaml
 active_model: nemotron
 
 models:
   nemotron:
-    hf_name: nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16
+    hf_name: nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16           # vLLM (Linux)
+    mlx_name: mlx-community/Mistral-NeMo-Minitron-8B-Instruct-4bit  # MLX (Mac)
     trust_remote_code: true
     max_model_len: 131072
     gpu_memory_utilization: 0.95
@@ -94,11 +116,15 @@ models:
     prefix_caching: true
     chunked_prefill: true
 
-  qwen-0.5b:  # lightweight test/validation profile
+  qwen-0.5b:
     hf_name: Qwen/Qwen2.5-0.5B-Instruct
+    mlx_name: mlx-community/Qwen2.5-0.5B-Instruct-4bit
     max_model_len: 4096
-    gpu_memory_utilization: 0.50
     ...
+
+mlx:
+  port: 8000
+  host: "0.0.0.0"
 ```
 
 Switch models without editing files:
@@ -112,17 +138,22 @@ teoria-engine config --model qwen-0.5b
 ```
 teoria-engine <command>
 
-up                    Start all services
+up                    Start all services (auto-detects backend)
 down                  Stop all services
 restart               Restart all services
 logs [N]              Follow logs (last N lines, default 200)
-status                Show container status
-health                Check gateway health
+status                Show container + backend status
+health                Check gateway + LLM backend health
 config [--model X]    Show resolved configuration
-service               Install as systemd service (requires root)
-unservice             Remove systemd service (requires root)
 preflight             Check system prerequisites
 help                  Show help
+```
+
+Linux-only:
+
+```
+service               Install as systemd service (requires root)
+unservice             Remove systemd service (requires root)
 ```
 
 All commands are also available via `make`:
@@ -132,6 +163,13 @@ make up            make down          make restart
 make logs          make status        make health
 make preflight     make service       make build
 ```
+
+### What `teoria-engine up` does
+
+| Platform | Behavior |
+|---|---|
+| Linux + NVIDIA | Activates `gpu` profile, starts vLLM container + gateway + nginx + observability |
+| macOS Apple Silicon | Starts MLX server natively, then gateway + nginx + observability in Docker (gateway connects via `host.docker.internal`) |
 
 ## API Usage
 
@@ -264,9 +302,9 @@ make test            # spin up mock vLLM stack, run integration + E2E tests, tea
 make test-smoke      # smoke tests against a real running stack (requires GPU + make up)
 ```
 
-The test stack uses `docker-compose.test.yml` to override vLLM with a lightweight mock server — no GPU needed.
+The test stack uses `docker-compose.test.yml` to override vLLM with a lightweight mock server — no GPU needed. Tests run on any platform.
 
-## systemd Service
+## systemd Service (Linux only)
 
 Run as a system service that starts on boot:
 
@@ -279,11 +317,11 @@ sudo teoria-engine unservice    # stop + disable + remove
 
 ```
 ├── bin/
-│   ├── teoria-engine        # main CLI
+│   ├── teoria-engine        # main CLI (manages vLLM or MLX based on platform)
 │   ├── load-config          # YAML → shell env parser
 │   └── setup-tunnel         # Cloudflare tunnel one-time provisioning
 ├── config/
-│   └── engine.yml           # model profiles and stack config
+│   └── engine.yml           # model profiles (hf_name + mlx_name) and stack config
 ├── gateway/
 │   ├── main.py              # FastAPI gateway (auth, streaming, telemetry)
 │   ├── Dockerfile
@@ -298,7 +336,7 @@ sudo teoria-engine unservice    # stop + disable + remove
 ├── systemd/
 │   └── teoria-engine.service
 ├── scripts/
-│   └── install.sh           # one-line installer
+│   └── install.sh           # one-line installer (Linux + macOS)
 ├── tests/
 │   ├── mock_vllm/           # lightweight mock for CI
 │   ├── test_integration.py
