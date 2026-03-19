@@ -1,7 +1,7 @@
 .PHONY: up down restart logs status health service unservice preflight build test test-up test-down test-smoke ssh-copy help
 
 ENGINE := ./bin/teoria-engine
-COMPOSE_TEST := docker compose -f docker-compose.yml -f docker-compose.test.yml --project-name teoria-test
+COMPOSE_TEST := docker compose -f docker-compose.yml -f docker-compose.test.yml --profile gpu --project-name teoria-test
 
 up: ## Start all services
 	@$(ENGINE) up
@@ -30,7 +30,7 @@ unservice: ## Remove systemd service (requires sudo)
 preflight: ## Check system prerequisites
 	@$(ENGINE) preflight
 
-build: ## Rebuild gateway image without starting
+build: ## Rebuild gateway image for current platform
 	@docker compose -f docker-compose.yml build
 
 test-up: ## Start test stack (mock vLLM, no GPU)

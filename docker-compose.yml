@@ -2,6 +2,7 @@ services:
 
   vllm:
     image: vllm/vllm-openai:latest
+    platform: linux/amd64
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=${VLLM_GPU_DEVICE:-0}
@@ -16,11 +17,17 @@ services:
       retries: 5
       start_period: 120s
     restart: always
+    profiles:
+      - gpu
 
   gateway:
-    build: ./gateway
+    build:
+      context: ./gateway
+      platforms:
+        - linux/amd64
+        - linux/arm64
     environment:
-      - VLLM_URL=http://vllm:8000
+      - VLLM_URL=${VLLM_URL:-http://vllm:8000}
       - VLLM_MODEL=${VLLM_MODEL:-}
       - API_KEY=${GATEWAY_API_KEY:-CHANGE_ME}
       - MAX_INPUT_TOKENS=${GATEWAY_MAX_INPUT_TOKENS:-8000}
@@ -30,9 +37,6 @@ services:
       - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-teoria-engine}
     ports:
       - "${GATEWAY_PORT:-9000}:9000"
-    depends_on:
-      vllm:
-        condition: service_healthy
     restart: always
 
   nginx:

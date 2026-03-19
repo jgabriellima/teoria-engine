@@ -16,6 +16,9 @@ services:
       start_period: 5s
 
   gateway:
+    depends_on:
+      vllm:
+        condition: service_healthy
     environment:
       - VLLM_URL=http://vllm:8000
       - API_KEY=test-key-123

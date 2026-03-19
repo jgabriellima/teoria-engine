@@ -7,11 +7,16 @@ active_model: nemotron
 
 # ---------------------------------------------------------------------------
 # Model profiles
+#
+# Each profile defines:
+#   hf_name   — HuggingFace model ID for vLLM (Linux + NVIDIA GPU)
+#   mlx_name  — HuggingFace model ID for MLX  (macOS Apple Silicon)
 # ---------------------------------------------------------------------------
 models:
 
   nemotron:
     hf_name: nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16
+    mlx_name: mlx-community/Mistral-NeMo-Minitron-8B-Instruct-4bit
     trust_remote_code: true
     max_model_len: 131072
     gpu_memory_utilization: 0.95
@@ -20,14 +25,22 @@ models:
     prefix_caching: true
     chunked_prefill: true
 
-  qwen-0.5b:  # lightweight test/validation profile
+  qwen-0.5b:
     hf_name: Qwen/Qwen2.5-0.5B-Instruct
+    mlx_name: mlx-community/Qwen2.5-0.5B-Instruct-4bit
     max_model_len: 4096
     gpu_memory_utilization: 0.50
     max_num_seqs: 64
     max_num_batched_tokens: 2048
     prefix_caching: true
     chunked_prefill: false
+
+# ---------------------------------------------------------------------------
+# MLX server (macOS only)
+# ---------------------------------------------------------------------------
+mlx:
+  port: 8000
+  host: "0.0.0.0"
 
 # ---------------------------------------------------------------------------
 # Gateway

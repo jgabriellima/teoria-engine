@@ -1,8 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_PATH="${BASH_SOURCE[0]}"
-[[ -L "$SCRIPT_PATH" ]] && SCRIPT_PATH="$(readlink -f "$SCRIPT_PATH")"
+_resolve_path() {
+    local target="$1"
+    if [[ -L "$target" ]]; then
+        if readlink -f "$target" &>/dev/null; then
+            readlink -f "$target"
+        else
+            local dir
+            dir="$(cd "$(dirname "$target")" && pwd -P)"
+            target="$(readlink "$target")"
+            if [[ "$target" != /* ]]; then
+                target="$dir/$target"
+            fi
+            cd "$(dirname "$target")" && echo "$(pwd -P)/$(basename "$target")"
+        fi
+    else
+        echo "$target"
+    fi
+}
+
+SCRIPT_PATH="$(_resolve_path "${BASH_SOURCE[0]}")"
 ENGINE_ROOT="${ENGINE_ROOT:-$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)}"
 COMPOSE_FILE="${ENGINE_ROOT}/docker-compose.yml"
 ENV_FILE="${ENGINE_ROOT}/.env"
@@ -11,6 +29,16 @@ SERVICE_NAME="teoria-engine"
 SYSTEMD_UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
 SYSTEMD_SRC="${ENGINE_ROOT}/systemd/${SERVICE_NAME}.service"
 LOAD_CONFIG="${ENGINE_ROOT}/bin/load-config"
+MLX_PID_FILE="${ENGINE_ROOT}/.mlx-server.pid"
+MLX_LOG_FILE="${ENGINE_ROOT}/.mlx-server.log"
+
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+
+_is_linux()  { [[ "$OS" == "Linux" ]]; }
+_is_macos()  { [[ "$OS" == "Darwin" ]]; }
+_has_nvidia() { command -v nvidia-smi &>/dev/null && docker info 2>/dev/null | grep -q nvidia; }
+_is_apple_silicon() { _is_macos && [[ "$ARCH" == "arm64" ]]; }
 
 _load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
@@ -24,20 +52,169 @@ _compose() {
     docker compose "${args[@]}" "$@"
 }
 
+# ---------------------------------------------------------------------------
+# MLX server management (macOS Apple Silicon)
+# ---------------------------------------------------------------------------
+
+_mlx_is_running() {
+    [[ -f "$MLX_PID_FILE" ]] && kill -0 "$(cat "$MLX_PID_FILE")" 2>/dev/null
+}
+
+_mlx_start() {
+    local model="${MLX_MODEL:-}"
+    local port="${MLX_PORT:-8000}"
+    local host="${MLX_HOST:-0.0.0.0}"
+
+    if [[ -z "$model" ]]; then
+        echo "[error] no mlx_name defined for model profile '${ACTIVE_MODEL:-unknown}' in config/engine.yml" >&2
+        echo "        add mlx_name to the model profile or switch to a profile that has it" >&2
+        return 1
+    fi
+
+    if ! command -v mlx_lm.server &>/dev/null; then
+        echo "[error] mlx_lm not installed. install it with:" >&2
+        echo "        pip install mlx-lm" >&2
+        return 1
+    fi
+
+    if _mlx_is_running; then
+        echo "[teoria-engine] MLX server already running (PID $(cat "$MLX_PID_FILE"))"
+        return 0
+    fi
+
+    echo "[teoria-engine] starting MLX server: ${model} on ${host}:${port}"
+    nohup mlx_lm.server \
+        --model "$model" \
+        --host "$host" \
+        --port "$port" \
+        > "$MLX_LOG_FILE" 2>&1 &
+    local pid=$!
+    echo "$pid" > "$MLX_PID_FILE"
+
+    echo "[teoria-engine] MLX server starting (PID ${pid}), waiting for health..."
+    local ready=false
+    for i in $(seq 1 120); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "[error] MLX server process died. check logs: $MLX_LOG_FILE" >&2
+            rm -f "$MLX_PID_FILE"
+            tail -20 "$MLX_LOG_FILE" >&2
+            return 1
+        fi
+        if curl -sf "http://localhost:${port}/v1/models" &>/dev/null; then
+            ready=true
+            break
+        fi
+        sleep 2
+    done
+
+    if $ready; then
+        echo "[teoria-engine] MLX server ready (PID ${pid}, model: ${model})"
+    else
+        echo "[warn] MLX server started but health check timed out after 240s"
+        echo "       model may still be downloading/loading. check: tail -f $MLX_LOG_FILE"
+    fi
+}
+
+_mlx_stop() {
+    if _mlx_is_running; then
+        local pid
+        pid="$(cat "$MLX_PID_FILE")"
+        echo "[teoria-engine] stopping MLX server (PID ${pid})"
+        kill "$pid" 2>/dev/null || true
+        for _ in $(seq 1 10); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+        done
+        kill -9 "$pid" 2>/dev/null || true
+        rm -f "$MLX_PID_FILE"
+        echo "[teoria-engine] MLX server stopped"
+    else
+        rm -f "$MLX_PID_FILE"
+    fi
+}
+
+_mlx_status() {
+    if _mlx_is_running; then
+        local pid port
+        pid="$(cat "$MLX_PID_FILE")"
+        port="${MLX_PORT:-8000}"
+        echo "[MLX] running (PID ${pid}, port ${port}, model: ${MLX_MODEL:-unknown})"
+        if curl -sf "http://localhost:${port}/v1/models" &>/dev/null; then
+            echo "[MLX] health: OK"
+        else
+            echo "[MLX] health: not responding"
+        fi
+    else
+        echo "[MLX] not running"
+    fi
+}
+
+_mlx_logs() {
+    if [[ -f "$MLX_LOG_FILE" ]]; then
+        tail -f "$MLX_LOG_FILE"
+    else
+        echo "[MLX] no log file found"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Determine LLM backend
+# ---------------------------------------------------------------------------
+
+_backend() {
+    if _has_nvidia; then
+        echo "vllm"
+    elif _is_apple_silicon; then
+        echo "mlx"
+    else
+        echo "[error] unsupported platform: ${OS}/${ARCH}" >&2
+        echo "        teoria-engine requires Linux + NVIDIA GPU or macOS Apple Silicon" >&2
+        exit 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
 cmd_up() {
     _load_config
-    echo "[teoria-engine] active model: ${ACTIVE_MODEL:-unknown} (${VLLM_MODEL:-unknown})"
+    local backend
+    backend="$(_backend)"
+
+    echo "[teoria-engine] active model : ${ACTIVE_MODEL:-unknown}"
+    echo "[teoria-engine] platform     : ${OS}/${ARCH}"
+    echo "[teoria-engine] backend      : ${backend}"
 
     local profiles=()
+
+    case "$backend" in
+        vllm)
+            profiles+=(--profile gpu)
+            echo "[teoria-engine] NVIDIA runtime detected — vLLM will run locally"
+            ;;
+        mlx)
+            _mlx_start
+            export VLLM_URL="http://host.docker.internal:${MLX_PORT:-8000}"
+            echo "[teoria-engine] gateway → ${VLLM_URL}"
+            ;;
+    esac
+
     if [[ -f "${ENGINE_ROOT}/cloudflared/tunnel.json" ]]; then
         profiles+=(--profile tunnel)
     fi
+
     _compose "${profiles[@]}" up -d --build
     echo "[teoria-engine] running"
 }
 
 cmd_down() {
-    _compose --profile tunnel down
+    _compose --profile gpu --profile tunnel down
+
+    if _is_apple_silicon; then
+        _mlx_stop
+    fi
+
     echo "[teoria-engine] stopped"
 }
 
@@ -47,37 +224,91 @@ cmd_restart() {
 }
 
 cmd_logs() {
-    _compose --profile tunnel logs -f --tail="${1:-200}"
+    if _is_apple_silicon && _mlx_is_running; then
+        echo "=== MLX server logs (Ctrl+C then re-run for Docker logs) ==="
+        _mlx_logs
+    else
+        _compose --profile gpu --profile tunnel logs -f --tail="${1:-200}"
+    fi
 }
 
 cmd_status() {
-    _compose --profile tunnel ps
+    _load_config 2>/dev/null || true
+    local backend
+    backend="$(_backend)"
+
+    echo "=== teoria-engine status ==="
+    echo "  platform : ${OS}/${ARCH}"
+    echo "  backend  : ${backend}"
+    echo ""
+
+    if [[ "$backend" == "mlx" ]]; then
+        _mlx_status
+        echo ""
+    fi
+
+    echo "--- Docker services ---"
+    _compose --profile gpu --profile tunnel ps
 }
 
 cmd_health() {
     _load_config 2>/dev/null || true
     local port="${GATEWAY_PORT:-9000}"
+
+    if _is_apple_silicon; then
+        local mlx_port="${MLX_PORT:-8000}"
+        echo -n "mlx server: "
+        if _mlx_is_running && curl -sf "http://localhost:${mlx_port}/v1/models" &>/dev/null; then
+            echo "healthy"
+        else
+            echo "unreachable"
+        fi
+    fi
+
+    echo -n "gateway:    "
     curl -sf "http://localhost:${port}/health" | python3 -m json.tool 2>/dev/null || echo '{"status":"unreachable"}'
 }
 
 cmd_config() {
     _load_config "$@"
+    local backend
+    backend="$(_backend)"
+
     echo "=== teoria-engine config ==="
-    echo "  active model : ${ACTIVE_MODEL}"
-    echo "  hf name      : ${VLLM_MODEL}"
-    echo "  max model len : ${VLLM_MAX_MODEL_LEN}"
-    echo "  gpu mem util  : ${VLLM_GPU_MEMORY_UTILIZATION}"
-    echo "  max seqs      : ${VLLM_MAX_NUM_SEQS}"
-    echo "  batch tokens  : ${VLLM_MAX_NUM_BATCHED_TOKENS}"
-    echo "  prefix cache  : ${VLLM_ENABLE_PREFIX_CACHING}"
-    echo "  chunked fill  : ${VLLM_ENABLE_CHUNKED_PREFILL}"
-    echo "  gateway port  : ${GATEWAY_PORT}"
+    echo "  platform      : ${OS}/${ARCH}"
+    echo "  backend       : ${backend}"
+    echo "  active model  : ${ACTIVE_MODEL}"
     echo ""
-    echo "  vllm command  :"
-    echo "    ${VLLM_COMMAND}"
+
+    if [[ "$backend" == "vllm" ]]; then
+        echo "  --- vLLM (Linux + NVIDIA GPU) ---"
+        echo "  hf name       : ${VLLM_MODEL}"
+        echo "  max model len : ${VLLM_MAX_MODEL_LEN}"
+        echo "  gpu mem util  : ${VLLM_GPU_MEMORY_UTILIZATION}"
+        echo "  max seqs      : ${VLLM_MAX_NUM_SEQS}"
+        echo "  batch tokens  : ${VLLM_MAX_NUM_BATCHED_TOKENS}"
+        echo "  prefix cache  : ${VLLM_ENABLE_PREFIX_CACHING}"
+        echo "  chunked fill  : ${VLLM_ENABLE_CHUNKED_PREFILL}"
+        echo "  vllm command  : ${VLLM_COMMAND}"
+    fi
+
+    if [[ "$backend" == "mlx" ]]; then
+        echo "  --- MLX (macOS + Apple Silicon) ---"
+        echo "  mlx model     : ${MLX_MODEL:-not configured}"
+        echo "  mlx host:port : ${MLX_HOST:-0.0.0.0}:${MLX_PORT:-8000}"
+    fi
+
+    echo ""
+    echo "  --- Gateway ---"
+    echo "  gateway port  : ${GATEWAY_PORT}"
 }
 
 cmd_service_install() {
+    if _is_macos; then
+        echo "[error] systemd services are not supported on macOS" >&2
+        echo "        use 'teoria-engine up' to run, or create a launchd plist manually" >&2
+        exit 1
+    fi
     if [[ $EUID -ne 0 ]]; then
         echo "[error] must run as root to install systemd service" >&2
         exit 1
@@ -94,6 +325,10 @@ cmd_service_install() {
 }
 
 cmd_service_uninstall() {
+    if _is_macos; then
+        echo "[error] systemd services are not supported on macOS" >&2
+        exit 1
+    fi
     if [[ $EUID -ne 0 ]]; then
         echo "[error] must run as root" >&2
         exit 1
@@ -110,7 +345,12 @@ cmd_uninstall() {
     echo ""
     echo "This will:"
     echo "  1. Stop and remove all containers and volumes"
-    echo "  2. Remove systemd service (if installed)"
+    if _is_apple_silicon; then
+        echo "  2. Stop MLX server"
+    fi
+    if _is_linux; then
+        echo "  2. Remove systemd service (if installed)"
+    fi
     echo "  3. Remove /usr/local/bin/teoria-engine symlink"
     echo "  4. Remove $ENGINE_ROOT"
     echo ""
@@ -121,12 +361,14 @@ cmd_uninstall() {
     fi
 
     cmd_down 2>/dev/null || true
-    _compose --profile tunnel down -v --remove-orphans 2>/dev/null || true
+    _compose --profile gpu --profile tunnel down -v --remove-orphans 2>/dev/null || true
 
-    if [[ $EUID -eq 0 ]]; then
-        cmd_service_uninstall 2>/dev/null || true
-    elif systemctl is-enabled "$SERVICE_NAME" &>/dev/null; then
-        echo "[warn] systemd service exists — run with sudo to remove it"
+    if _is_linux; then
+        if [[ $EUID -eq 0 ]]; then
+            cmd_service_uninstall 2>/dev/null || true
+        elif systemctl is-enabled "$SERVICE_NAME" &>/dev/null; then
+            echo "[warn] systemd service exists — run with sudo to remove it"
+        fi
     fi
 
     rm -f /usr/local/bin/teoria-engine 2>/dev/null || sudo rm -f /usr/local/bin/teoria-engine 2>/dev/null || true
@@ -142,7 +384,14 @@ cmd_uninstall() {
 
 cmd_preflight() {
     local ok=true
+    _load_config 2>/dev/null || true
+    local backend
+    backend="$(_backend)"
+
     echo "=== teoria-engine preflight ==="
+    echo "  platform : ${OS}/${ARCH}"
+    echo "  backend  : ${backend}"
+    echo ""
 
     if ! command -v docker &>/dev/null; then
         echo "[FAIL] docker not found"; ok=false
@@ -156,18 +405,33 @@ cmd_preflight() {
         echo "[OK]   docker compose $(docker compose version --short)"
     fi
 
-    if command -v nvidia-smi &>/dev/null; then
-        echo "[OK]   nvidia-smi detected"
-        nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || true
-    else
-        echo "[WARN] nvidia-smi not found (GPU node?)"
-    fi
-
-    if docker info 2>/dev/null | grep -q nvidia; then
-        echo "[OK]   nvidia container runtime"
-    else
-        echo "[WARN] nvidia runtime not detected in docker"
-    fi
+    case "$backend" in
+        vllm)
+            if command -v nvidia-smi &>/dev/null; then
+                echo "[OK]   nvidia-smi detected"
+                nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || true
+            fi
+            if docker info 2>/dev/null | grep -q nvidia; then
+                echo "[OK]   nvidia container runtime"
+            else
+                echo "[WARN] nvidia runtime not detected in docker"
+            fi
+            ;;
+        mlx)
+            echo "[OK]   Apple Silicon detected (${ARCH})"
+            if command -v mlx_lm.server &>/dev/null; then
+                echo "[OK]   mlx-lm installed"
+            else
+                echo "[FAIL] mlx-lm not installed — run: pip install mlx-lm"; ok=false
+            fi
+            local mlx_model="${MLX_MODEL:-}"
+            if [[ -n "$mlx_model" ]]; then
+                echo "[OK]   MLX model configured: ${mlx_model}"
+            else
+                echo "[FAIL] no mlx_name defined for model '${ACTIVE_MODEL:-unknown}' in config/engine.yml"; ok=false
+            fi
+            ;;
+    esac
 
     if [[ ! -f "$ENV_FILE" ]]; then
         echo "[WARN] .env not found — run: cp .env.example .env"
@@ -179,9 +443,10 @@ cmd_preflight() {
         echo "[FAIL] config/engine.yml not found"; ok=false
     else
         echo "[OK]   config/engine.yml present"
-        _load_config 2>/dev/null && echo "       active model: ${ACTIVE_MODEL} (${VLLM_MODEL})" || true
+        echo "       active model: ${ACTIVE_MODEL:-unknown} (backend: ${backend})"
     fi
 
+    echo ""
     $ok && echo "=== preflight passed ===" || echo "=== preflight has warnings ==="
 }
 
@@ -197,16 +462,29 @@ Commands:
   restart               Restart all services
   logs [N]              Follow logs (last N lines, default 200)
   status                Show container status
-  health                Check gateway health
+  health                Check health (gateway + LLM backend)
   config [--model X]    Show resolved configuration
-  service               Install as systemd service (requires root)
-  unservice             Remove systemd service (requires root)
-  uninstall             Remove everything (containers, volumes, files)
   preflight             Check system prerequisites
   help                  Show this message
+EOF
+
+    if _is_linux; then
+        cat <<EOF
+
+Linux-only:
+  service               Install as systemd service (requires root)
+  unservice             Remove systemd service (requires root)
+EOF
+    fi
+
+    cat <<EOF
 
 Model override:
   teoria-engine config --model qwen-0.5b
+
+Supported platforms:
+  Linux + NVIDIA GPU  →  vLLM (Docker, CUDA)
+  macOS Apple Silicon →  MLX  (native, Metal)
 EOF
 }
 
