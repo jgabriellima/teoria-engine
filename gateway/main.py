@@ -11,8 +11,8 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
-VLLM_URL = os.getenv("VLLM_URL", "http://vllm:8000")
-VLLM_MODEL = os.getenv("VLLM_MODEL", "")
+LLM_BACKEND_URL = os.getenv("VLLM_URL", "http://vllm:8000")
+LLM_MODEL = os.getenv("VLLM_MODEL", "")
 API_KEY = os.getenv("API_KEY", "CHANGE_ME")
 MAX_INPUT_TOKENS = int(os.getenv("MAX_INPUT_TOKENS", "8000"))
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "2000"))
@@ -37,7 +37,7 @@ async def lifespan(_app: FastAPI):
     global _semaphore, _http
     _init_telemetry()
     _semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-    _http = httpx.AsyncClient(base_url=VLLM_URL, timeout=httpx.Timeout(300.0, connect=10.0))
+    _http = httpx.AsyncClient(base_url=LLM_BACKEND_URL, timeout=httpx.Timeout(300.0, connect=10.0))
     yield
     await _http.aclose()
 
@@ -63,10 +63,10 @@ def _validate_payload(payload: dict) -> str | None:
     return None
 
 
-def _resolve_model_for_vllm(payload: dict) -> dict:
-    """Rewrite model field so vLLM receives HF ID, not profile name."""
+def _resolve_model(payload: dict) -> dict:
+    """Rewrite model field so the backend receives the correct model ID."""
     out = dict(payload)
-    out["model"] = VLLM_MODEL or payload.get("model") or ""
+    out["model"] = LLM_MODEL or payload.get("model") or ""
     return out
 
 
@@ -96,8 +96,7 @@ def _chat_request_to_openai(payload: ChatRequest) -> dict:
         "temperature": payload.temperature,
         "stream": payload.stream,
     }
-    # vLLM expects HF model ID; resolve profile name via VLLM_MODEL
-    body["model"] = VLLM_MODEL or payload.model or ""
+    body["model"] = LLM_MODEL or payload.model or ""
     return body
 
 
@@ -110,13 +109,13 @@ async def api_chat(payload: ChatRequest):
     if err := _validate_payload(payload.model_dump()):
         return JSONResponse({"error": err}, status_code=400)
 
-    vllm_payload = _chat_request_to_openai(payload)
+    llm_payload = _chat_request_to_openai(payload)
 
     async with _semaphore:
         with tracer.start_as_current_span("llm_request"):
             if payload.stream:
-                return await _stream_response(vllm_payload)
-            resp = await _http.post("/v1/chat/completions", json=vllm_payload)
+                return await _stream_response(llm_payload)
+            resp = await _http.post("/v1/chat/completions", json=llm_payload)
             return JSONResponse(resp.json(), status_code=resp.status_code)
 
 
@@ -126,13 +125,13 @@ async def chat_completions(request: Request):
     if err := _validate_payload(payload):
         return JSONResponse({"error": err}, status_code=400)
 
-    vllm_payload = _resolve_model_for_vllm(payload)
+    llm_payload = _resolve_model(payload)
     async with _semaphore:
         with tracer.start_as_current_span("llm_request"):
-            stream = vllm_payload.get("stream", False)
+            stream = llm_payload.get("stream", False)
             if stream:
-                return await _stream_response(vllm_payload)
-            resp = await _http.post("/v1/chat/completions", json=vllm_payload)
+                return await _stream_response(llm_payload)
+            resp = await _http.post("/v1/chat/completions", json=llm_payload)
             return JSONResponse(resp.json(), status_code=resp.status_code)
 
 
@@ -158,20 +157,29 @@ async def chat_simple(request: Request):
     if err := _validate_payload(payload):
         return JSONResponse({"error": err}, status_code=400)
 
-    vllm_payload = _resolve_model_for_vllm(payload)
+    llm_payload = _resolve_model(payload)
     async with _semaphore:
         with tracer.start_as_current_span("llm_request"):
-            resp = await _http.post("/v1/chat/completions", json=vllm_payload)
+            resp = await _http.post("/v1/chat/completions", json=llm_payload)
             return JSONResponse(resp.json(), status_code=resp.status_code)
 
 
 @app.get("/health")
 async def health():
+    backend_ok = False
     try:
         r = await _http.get("/health")
-        vllm_ok = r.status_code == 200
+        if r.status_code == 200:
+            backend_ok = True
     except Exception:
-        vllm_ok = False
-    status = "healthy" if vllm_ok else "degraded"
-    code = 200 if vllm_ok else 503
-    return JSONResponse({"status": status, "vllm": vllm_ok}, status_code=code)
+        pass
+    if not backend_ok:
+        try:
+            r = await _http.get("/v1/models")
+            if r.status_code == 200:
+                backend_ok = True
+        except Exception:
+            pass
+    status = "healthy" if backend_ok else "degraded"
+    code = 200 if backend_ok else 503
+    return JSONResponse({"status": status, "backend": backend_ok, "backend_url": LLM_BACKEND_URL}, status_code=code)

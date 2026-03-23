@@ -229,7 +229,7 @@ Task-oriented contract with `system_prompt` + `input`:
 
 ```bash
 curl https://llm.jambu.ai/api/v1/chat \
-  -H "Authorization: Bearer YOUR_KEY" \
+  -H "Authorization: Bearer default" \
   -H "Content-Type: application/json" \
   -d '{
     "input": "Compute exactly: 93847 × 76429",

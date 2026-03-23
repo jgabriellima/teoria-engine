@@ -196,7 +196,8 @@ cmd_up() {
         mlx)
             _mlx_start
             export VLLM_URL="http://host.docker.internal:${MLX_PORT:-8000}"
-            echo "[teoria-engine] gateway → ${VLLM_URL}"
+            export VLLM_MODEL="${MLX_MODEL}"
+            echo "[teoria-engine] gateway → ${VLLM_URL} (model: ${MLX_MODEL})"
             ;;
     esac
 
