@@ -40,6 +40,37 @@ models:
     chunked_prefill: false
     enable_auto_tool_choice: false
 
+  # ---------------------------------------------------------------------------
+  # Qwen3-VL-8B — Vision-Language (24 GB VRAM)
+  #
+  # vLLM backend: BNB 4-bit (Unsloth). Hard operating envelope from deployment
+  # card — do NOT relax these limits without re-validating VRAM headroom.
+  #
+  # Critical constraints (24 GB VRAM reality):
+  #   • 1 image per request; pre-resize to 512–768 px before sending
+  #   • max_concurrent_requests must be capped at 2 at the gateway/infra level
+  #   • KV cache is the primary failure point with VL — monitor continuously
+  #   • --enforce-eager disables CUDA graphs (required for VL stability)
+  #   • prefix_caching + chunked_prefill are incompatible with --enforce-eager
+  #
+  # MLX backend (preferred for vision on Apple Silicon):
+  #   mlx-community/Qwen3-VL-8B-Instruct-4bit
+  #   max_tokens = 2048 / MAX_PIXELS = 512×512 / 1 image per request / streaming
+  # ---------------------------------------------------------------------------
+  qwen3-vl-8b:
+    hf_name: unsloth/Qwen3-VL-8B-Instruct-unsloth-bnb-4bit
+    mlx_name: mlx-community/Qwen3-VL-8B-Instruct-4bit
+    trust_remote_code: true
+    max_model_len: 4096
+    gpu_memory_utilization: 0.82
+    max_num_seqs: 2
+    max_num_batched_tokens: 4096
+    prefix_caching: false
+    chunked_prefill: false
+    enable_auto_tool_choice: false
+    enforce_eager: true
+    vllm_extra_args: "--disable-log-stats"
+
 # ---------------------------------------------------------------------------
 # MLX server (macOS only)
 # ---------------------------------------------------------------------------

@@ -47,6 +47,13 @@ def load(config_path: str, model_override: str | None = None) -> dict[str, str]:
         vllm_flags.append("--enable-auto-tool-choice")
         parser = model.get("tool_call_parser", "llama3_json")
         vllm_flags.append(f"--tool-call-parser {parser}")
+    if model.get("enforce_eager", False):
+        vllm_flags.append("--enforce-eager")
+    if model.get("async_scheduling", False):
+        vllm_flags.append("--async-scheduling")
+    extra = model.get("vllm_extra_args", "").strip()
+    if extra:
+        vllm_flags.append(extra)
 
     env = {
         "ACTIVE_MODEL": active,
