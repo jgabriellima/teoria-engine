@@ -2,7 +2,15 @@
 
 Production-grade LLM inference stack. Runs on Linux with NVIDIA GPUs (via vLLM) or macOS Apple Silicon (via MLX). Orchestrates the LLM backend, a FastAPI gateway, NGINX reverse proxy, and optional Cloudflare tunnel — all managed through a single CLI.
 
-Default model: **nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16** (~31.6B params, ~3.6B active per token via MoE).
+Default model: **nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16**.
+
+### Available Model Profiles
+
+| Profile | vLLM (Linux) | MLX (macOS) | Type |
+|---|---|---|---|
+| `nemotron` *(default)* | `nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16` | `mlx-community/Mistral-NeMo-Minitron-8B-Instruct-4bit` | Text / Tool calling |
+| `qwen-0.5b` | `Qwen/Qwen2.5-0.5B-Instruct` | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | Text (lightweight) |
+| `qwen3-vl-8b` | `unsloth/Qwen3-VL-8B-Instruct-unsloth-bnb-4bit` | `mlx-community/Qwen3-VL-8B-Instruct-4bit` | Vision-Language |
 
 ## Architecture
 
@@ -99,15 +107,57 @@ VLLM_GPU_DEVICE=0
 
 ### config/engine.yml (model profiles)
 
-Each profile defines models for both platforms:
+`config/engine.yml` is the single source of truth for the entire stack. Secrets and hardware-specific values go in `.env`; everything else lives here.
+
+#### Model profile fields
+
+| Field | Description |
+|---|---|
+| `hf_name` | HuggingFace model ID used by vLLM (Linux + NVIDIA) |
+| `mlx_name` | HuggingFace model ID used by MLX (macOS Apple Silicon) |
+| `trust_remote_code` | Pass `--trust-remote-code` to vLLM |
+| `max_model_len` | Maximum context length (tokens) |
+| `gpu_memory_utilization` | Fraction of VRAM reserved for KV cache |
+| `max_num_seqs` | Maximum concurrent sequences in flight |
+| `max_num_batched_tokens` | Maximum tokens per batch |
+| `prefix_caching` | Enable prefix caching (`--enable-prefix-caching`) |
+| `chunked_prefill` | Enable chunked prefill (`--enable-chunked-prefill`) |
+| `enforce_eager` | Disable CUDA graphs (`--enforce-eager`) — required for VL model stability |
+| `async_scheduling` | Enable async scheduling (`--async-scheduling`) |
+| `enable_auto_tool_choice` | Enable tool / function calling |
+| `tool_call_parser` | Parser for tool calls: `llama3_json`, `mistral`, `hermes`, `internlm`, `granite-20b-fc` |
+| `vllm_extra_args` | Raw string appended verbatim to the `vllm serve` command (for flags not covered above) |
+| `gateway` | Per-model gateway overrides (see below) |
+
+#### Per-model gateway overrides
+
+Each profile can define a `gateway:` block that overrides the global `gateway:` defaults for that specific model. `bin/load-config` merges them at startup — the model wins, global is the fallback.
+
+```yaml
+models:
+  your-model:
+    hf_name: ...
+    mlx_name: ...
+    # ... vLLM settings ...
+    gateway:
+      max_input_tokens: 2048        # override global default
+      max_output_tokens: 2048
+      max_concurrent_requests: 2    # critical for memory-constrained models
+      cache:
+        enabled: false              # multimodal requests are unique; caching wastes memory
+```
+
+This means the `gateway:` top-level block is just the baseline — models that need tighter or looser limits declare it in their own profile, and the running stack enforces it automatically.
+
+#### Example: full profile reference
 
 ```yaml
 active_model: nemotron
 
 models:
   nemotron:
-    hf_name: nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16           # vLLM (Linux)
-    mlx_name: mlx-community/Mistral-NeMo-Minitron-8B-Instruct-4bit  # MLX (Mac)
+    hf_name: nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16
+    mlx_name: mlx-community/Mistral-NeMo-Minitron-8B-Instruct-4bit
     trust_remote_code: true
     max_model_len: 131072
     gpu_memory_utilization: 0.95
@@ -115,22 +165,55 @@ models:
     max_num_batched_tokens: 8192
     prefix_caching: true
     chunked_prefill: true
+    enable_auto_tool_choice: true
+    tool_call_parser: llama3_json
 
   qwen-0.5b:
     hf_name: Qwen/Qwen2.5-0.5B-Instruct
     mlx_name: mlx-community/Qwen2.5-0.5B-Instruct-4bit
     max_model_len: 4096
-    ...
+    gpu_memory_utilization: 0.50
+    max_num_seqs: 64
+    max_num_batched_tokens: 2048
+    prefix_caching: true
+    chunked_prefill: false
+    enable_auto_tool_choice: false
 
-mlx:
-  port: 8000
-  host: "0.0.0.0"
+  qwen3-vl-8b:
+    hf_name: unsloth/Qwen3-VL-8B-Instruct-unsloth-bnb-4bit
+    mlx_name: mlx-community/Qwen3-VL-8B-Instruct-4bit
+    trust_remote_code: true
+    max_model_len: 4096
+    gpu_memory_utilization: 0.82
+    max_num_seqs: 2
+    max_num_batched_tokens: 4096
+    prefix_caching: false          # incompatible with --enforce-eager
+    chunked_prefill: false
+    enable_auto_tool_choice: false
+    enforce_eager: true            # required for VL stability on 24 GB VRAM
+    vllm_extra_args: "--disable-log-stats"
+    gateway:
+      max_input_tokens: 2048
+      max_output_tokens: 2048
+      max_concurrent_requests: 2   # hard limit — VL KV cache is unstable above 2
+      cache:
+        enabled: false
+
+gateway:
+  port: 9000
+  max_input_tokens: 8000           # overridden per model when needed
+  max_output_tokens: 2000
+  max_concurrent_requests: 64
+  cache:
+    enabled: true
+    max_entries: 2048
+    ttl_seconds: 3600
 ```
 
 Switch models without editing files:
 
 ```bash
-teoria-engine config --model qwen-0.5b
+teoria-engine config --model qwen3-vl-8b
 ```
 
 ## CLI Reference
@@ -248,6 +331,61 @@ curl https://llm.jambu.ai/api/v1/chat \
 | `max_tokens`   | int     | no       | 2048    | Max completion tokens          |
 | `stream`       | boolean | no       | false   | Stream response                |
 
+## Vision-Language Models (Qwen3-VL-8B)
+
+The `qwen3-vl-8b` profile runs a vision-language model with hard operational constraints derived from 24 GB VRAM reality. Breaking any of these limits causes OOM or KV cache collapse.
+
+### Operating envelope
+
+| Constraint | Limit | Reason |
+|---|---|---|
+| Images per request | **1** | KV cache scales non-linearly with image patches |
+| Image resolution | **512–768 px** (pre-resize mandatory) | Resolution is the main hidden VRAM driver |
+| Context length | **≤ 4096 tokens** | Hard vLLM limit for this profile |
+| Concurrent requests | **2** | Enforced by gateway `max_concurrent_requests` override |
+| Max output tokens | **2048** | Enforced by gateway `max_output_tokens` override |
+
+### Why `--enforce-eager`
+
+vLLM uses CUDA graph capture by default to speed up inference. For vision-language models on 24 GB VRAM, CUDA graphs are unstable — they reserve additional memory at capture time that conflicts with the vision encoder's dynamic allocation. `enforce_eager: true` disables this, trading a small throughput regression for stability.
+
+As a consequence, `prefix_caching` and `chunked_prefill` must also be disabled (they assume graph-mode execution internals).
+
+### Recommended architecture for VL workloads
+
+```
+[MLX or vLLM — Vision stage]       [vLLM — Reasoning stage]
+  receive image + prompt        →     receive structured caption / JSON
+  extract: caption / JSON             run: analysis / generation
+  max_tokens: 512–1024                max_tokens: 2048
+```
+
+Running two specialized stages instead of one large multimodal request reduces peak KV cache pressure, improves stability, and increases throughput.
+
+### Sending images via the API
+
+Images must be pre-resized to ≤ 768 px before sending. The model accepts standard OpenAI vision format:
+
+```bash
+curl https://llm.jambu.ai/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "unsloth/Qwen3-VL-8B-Instruct-unsloth-bnb-4bit",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
+        {"type": "text", "text": "Describe this image in JSON."}
+      ]
+    }],
+    "max_tokens": 512,
+    "stream": true
+  }'
+```
+
+> **Do not run VL like a standard LLM.** Monitor VRAM continuously (especially KV cache). Test with real inputs, not synthetic prompts.
+
 ## Cloudflare Tunnel (Public Exposure)
 
 To expose the stack to the internet without opening router ports:
@@ -318,10 +456,10 @@ sudo teoria-engine unservice    # stop + disable + remove
 ```
 ├── bin/
 │   ├── teoria-engine        # main CLI (manages vLLM or MLX based on platform)
-│   ├── load-config          # YAML → shell env parser
+│   ├── load-config          # YAML → shell env parser (merges model-level gateway overrides)
 │   └── setup-tunnel         # Cloudflare tunnel one-time provisioning
 ├── config/
-│   └── engine.yml           # model profiles (hf_name + mlx_name) and stack config
+│   └── engine.yml           # single source of truth: model profiles + gateway + observability
 ├── gateway/
 │   ├── main.py              # FastAPI gateway (auth, streaming, telemetry)
 │   ├── Dockerfile
