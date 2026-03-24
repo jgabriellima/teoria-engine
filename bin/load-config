@@ -26,8 +26,12 @@ def load(config_path: str, model_override: str | None = None) -> dict[str, str]:
         available = ", ".join(cfg.get("models", {}).keys())
         sys.exit(f"model profile '{active}' not found. available: {available}")
 
-    gw = cfg.get("gateway", {})
-    gw_cache = gw.get("cache", {})
+    # Gateway: global defaults → model-level overrides (model takes precedence)
+    gw_global = cfg.get("gateway", {})
+    gw_model = model.get("gateway", {})
+    gw = {**gw_global, **{k: v for k, v in gw_model.items() if k != "cache"}}
+    gw_cache = {**gw_global.get("cache", {}), **gw_model.get("cache", {})}
+
     obs = cfg.get("observability", {})
     mlx_cfg = cfg.get("mlx", {})
 

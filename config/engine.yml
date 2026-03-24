@@ -11,6 +11,20 @@ active_model: nemotron
 # Each profile defines:
 #   hf_name   — HuggingFace model ID for vLLM (Linux + NVIDIA GPU)
 #   mlx_name  — HuggingFace model ID for MLX  (macOS Apple Silicon)
+#
+# Gateway overrides (optional per-model block):
+#   Any key under a model's `gateway:` section overrides the global
+#   `gateway:` defaults below. Use this to enforce model-specific
+#   operational limits (context size, concurrency, cache behavior).
+#
+#   gateway:
+#     max_input_tokens: <int>
+#     max_output_tokens: <int>
+#     max_concurrent_requests: <int>
+#     cache:
+#       enabled: <bool>
+#       max_entries: <int>
+#       ttl_seconds: <int>
 # ---------------------------------------------------------------------------
 models:
 
@@ -70,6 +84,13 @@ models:
     enable_auto_tool_choice: false
     enforce_eager: true
     vllm_extra_args: "--disable-log-stats"
+    # Per-model gateway overrides — enforced via load-config merge, not global defaults
+    gateway:
+      max_input_tokens: 2048   # VL token budget is dominated by image patches, not text
+      max_output_tokens: 2048  # deployment card: max_tokens = 2048
+      max_concurrent_requests: 2  # hard limit: VL KV cache is unstable above 2
+      cache:
+        enabled: false         # multimodal requests are unique; caching wastes memory
 
 # ---------------------------------------------------------------------------
 # MLX server (macOS only)
