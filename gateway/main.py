@@ -165,6 +165,11 @@ async def api_chat(payload: ChatRequest):
 
     llm_payload = _chat_request_to_openai(payload)
 
+    if payload.stream:
+        async with _semaphore:
+            with tracer.start_as_current_span("llm_request"):
+                return await _stream_response(llm_payload)
+
     if _is_deterministic(llm_payload):
         key = _cache_key(llm_payload)
         cached = _cache_get(key)
@@ -175,8 +180,6 @@ async def api_chat(payload: ChatRequest):
 
     async with _semaphore:
         with tracer.start_as_current_span("llm_request"):
-            if payload.stream:
-                return await _stream_response(llm_payload)
             resp = await _http.post("/v1/chat/completions", json=llm_payload)
             body = resp.json()
             if key is not None and resp.status_code == 200:
@@ -192,6 +195,11 @@ async def chat_completions(request: Request):
 
     llm_payload = _resolve_model(payload)
 
+    if llm_payload.get("stream", False):
+        async with _semaphore:
+            with tracer.start_as_current_span("llm_request"):
+                return await _stream_response(llm_payload)
+
     if _is_deterministic(llm_payload):
         key = _cache_key(llm_payload)
         cached = _cache_get(key)
@@ -202,9 +210,6 @@ async def chat_completions(request: Request):
 
     async with _semaphore:
         with tracer.start_as_current_span("llm_request"):
-            stream = llm_payload.get("stream", False)
-            if stream:
-                return await _stream_response(llm_payload)
             resp = await _http.post("/v1/chat/completions", json=llm_payload)
             body = resp.json()
             if key is not None and resp.status_code == 200:
