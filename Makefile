@@ -1,4 +1,4 @@
-.PHONY: up down restart logs status health service unservice preflight build test test-up test-down test-smoke ssh-copy help
+.PHONY: up down restart logs status health service unservice preflight build test test-up test-down test-smoke notebook ssh-copy help
 
 ENGINE := ./bin/teoria-engine
 COMPOSE_TEST := docker compose -f docker-compose.yml -f docker-compose.test.yml --profile gpu --project-name teoria-test
@@ -52,6 +52,11 @@ test: test-up ## Run integration + E2E tests against mock stack
 
 test-smoke: ## Run smoke tests against REAL stack (requires GPU + make up)
 	@uv run --with pytest --with httpx pytest tests/test_smoke.py -v --tb=long
+
+notebook: ## Launch Jupyter notebook server (notebooks/ dir, port 8888)
+	@UV_CACHE_DIR=$${XDG_CACHE_HOME:-$$HOME/.cache}/uv-user \
+		uv run --with jupyter --with ipykernel --with openai --with langchain-openai --with httpx \
+		jupyter notebook notebooks/ --no-browser --port 8888
 
 ssh-copy: ## Show public SSH key to add to remote servers
 	@key=""; \

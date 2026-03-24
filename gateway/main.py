@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import threading
+import time
 from contextlib import asynccontextmanager
 
 import httpx
@@ -165,21 +166,18 @@ async def api_chat(payload: ChatRequest):
 
     llm_payload = _chat_request_to_openai(payload)
 
-    if payload.stream:
-        async with _semaphore:
-            with tracer.start_as_current_span("llm_request"):
-                return await _stream_response(llm_payload)
-
     if _is_deterministic(llm_payload):
         key = _cache_key(llm_payload)
         cached = _cache_get(key)
         if cached is not None:
-            return JSONResponse(cached, headers={"X-Cache": "HIT"})
+            return _stream_from_cache(cached) if payload.stream else JSONResponse(cached, headers={"X-Cache": "HIT"})
     else:
         key = None
 
     async with _semaphore:
         with tracer.start_as_current_span("llm_request"):
+            if payload.stream:
+                return await _stream_response(llm_payload)
             resp = await _http.post("/v1/chat/completions", json=llm_payload)
             body = resp.json()
             if key is not None and resp.status_code == 200:
@@ -194,22 +192,20 @@ async def chat_completions(request: Request):
         return _openai_error(err)
 
     llm_payload = _resolve_model(payload)
-
-    if llm_payload.get("stream", False):
-        async with _semaphore:
-            with tracer.start_as_current_span("llm_request"):
-                return await _stream_response(llm_payload)
+    is_stream = llm_payload.get("stream", False)
 
     if _is_deterministic(llm_payload):
         key = _cache_key(llm_payload)
         cached = _cache_get(key)
         if cached is not None:
-            return JSONResponse(cached, headers={"X-Cache": "HIT"})
+            return _stream_from_cache(cached) if is_stream else JSONResponse(cached, headers={"X-Cache": "HIT"})
     else:
         key = None
 
     async with _semaphore:
         with tracer.start_as_current_span("llm_request"):
+            if is_stream:
+                return await _stream_response(llm_payload)
             resp = await _http.post("/v1/chat/completions", json=llm_payload)
             body = resp.json()
             if key is not None and resp.status_code == 200:
@@ -230,6 +226,46 @@ async def _stream_response(payload: dict) -> StreamingResponse:
 
     return StreamingResponse(generate(), media_type="text/event-stream",
                              headers={"X-Accel-Buffering": "no"})
+
+
+def _stream_from_cache(cached: dict) -> StreamingResponse:
+    """Reconstruct a valid SSE stream from a cached non-stream response.
+
+    Cache is always written by non-stream requests. Streaming clients can read
+    those entries — they get the full content in a single SSE chunk, which is
+    spec-compliant and avoids a round-trip to the backend.
+    """
+    choice = cached.get("choices", [{}])[0]
+    content = choice.get("message", {}).get("content", "")
+    resp_id = cached.get("id", f"chatcmpl-cached-{int(time.time())}")
+    created = cached.get("created", int(time.time()))
+    model = cached.get("model", "")
+
+    content_chunk = json.dumps({
+        "id": resp_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {"role": "assistant", "content": content}, "finish_reason": None}],
+    })
+    finish_chunk = json.dumps({
+        "id": resp_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    })
+
+    async def generate():
+        yield f"data: {content_chunk}\n\n"
+        yield f"data: {finish_chunk}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "X-Cache": "HIT"},
+    )
 
 
 @app.post("/chat")
