@@ -24,6 +24,10 @@ models:
     max_num_batched_tokens: 8192
     prefix_caching: true
     chunked_prefill: true
+    # Tool calling (required for deepagents / function calling)
+    # Supported parsers: llama3_json | mistral | hermes | internlm | granite-20b-fc
+    enable_auto_tool_choice: true
+    tool_call_parser: llama3_json
 
   qwen-0.5b:
     hf_name: Qwen/Qwen2.5-0.5B-Instruct
@@ -34,6 +38,7 @@ models:
     max_num_batched_tokens: 2048
     prefix_caching: true
     chunked_prefill: false
+    enable_auto_tool_choice: false
 
 # ---------------------------------------------------------------------------
 # MLX server (macOS only)

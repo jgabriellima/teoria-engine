@@ -55,7 +55,9 @@ test-smoke: ## Run smoke tests against REAL stack (requires GPU + make up)
 
 notebook: ## Launch Jupyter notebook server (notebooks/ dir, port 8888)
 	@UV_CACHE_DIR=$${XDG_CACHE_HOME:-$$HOME/.cache}/uv-user \
-		uv run --with jupyter --with ipykernel --with openai --with langchain-openai --with httpx \
+		uv run --with jupyter --with ipykernel \
+		--with openai --with langchain-openai --with langchain --with httpx \
+		--with "deepagents>=0.4.12" \
 		jupyter notebook notebooks/ --no-browser --port 8888
 
 ssh-copy: ## Show public SSH key to add to remote servers

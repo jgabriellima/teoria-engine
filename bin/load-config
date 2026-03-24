@@ -43,6 +43,10 @@ def load(config_path: str, model_override: str | None = None) -> dict[str, str]:
         vllm_flags.append("--enable-prefix-caching")
     if model.get("chunked_prefill", True):
         vllm_flags.append("--enable-chunked-prefill")
+    if model.get("enable_auto_tool_choice", False):
+        vllm_flags.append("--enable-auto-tool-choice")
+        parser = model.get("tool_call_parser", "llama3_json")
+        vllm_flags.append(f"--tool-call-parser {parser}")
 
     env = {
         "ACTIVE_MODEL": active,
