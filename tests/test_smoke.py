@@ -105,7 +105,7 @@ class TestGPUHealth:
         assert r.status_code == 200
         body = r.json()
         assert body["status"] == "healthy"
-        assert body["vllm"] is True
+        assert body["backend"] is True
 
     def test_concurrent_real_inference(self, nginx_url, authed_headers):
         """5 parallel requests to verify vLLM batching works."""

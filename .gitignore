@@ -9,3 +9,4 @@ build/
 .ruff_cache/
 *.log
 .mlx-server.pid
+.venv*

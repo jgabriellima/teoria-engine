@@ -27,6 +27,7 @@ def load(config_path: str, model_override: str | None = None) -> dict[str, str]:
         sys.exit(f"model profile '{active}' not found. available: {available}")
 
     gw = cfg.get("gateway", {})
+    gw_cache = gw.get("cache", {})
     obs = cfg.get("observability", {})
     mlx_cfg = cfg.get("mlx", {})
 
@@ -63,6 +64,9 @@ def load(config_path: str, model_override: str | None = None) -> dict[str, str]:
         "GATEWAY_MAX_INPUT_TOKENS": str(gw.get("max_input_tokens", 8000)),
         "GATEWAY_MAX_OUTPUT_TOKENS": str(gw.get("max_output_tokens", 2000)),
         "GATEWAY_MAX_CONCURRENT_REQUESTS": str(gw.get("max_concurrent_requests", 64)),
+        "GATEWAY_CACHE_ENABLED": str(gw_cache.get("enabled", True)).lower(),
+        "GATEWAY_CACHE_MAX_ENTRIES": str(gw_cache.get("max_entries", 2048)),
+        "GATEWAY_CACHE_TTL": str(gw_cache.get("ttl_seconds", 3600)),
         "OTEL_ENDPOINT": obs.get("otel_endpoint", "http://otel-collector:4317"),
         "OTEL_SERVICE_NAME": obs.get("service_name", "teoria-engine"),
     }

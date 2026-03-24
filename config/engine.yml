@@ -50,6 +50,10 @@ gateway:
   max_input_tokens: 8000
   max_output_tokens: 2000
   max_concurrent_requests: 64
+  cache:
+    enabled: true
+    max_entries: 2048
+    ttl_seconds: 3600
 
 # ---------------------------------------------------------------------------
 # NGINX

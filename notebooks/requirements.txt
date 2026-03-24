@@ -1,0 +1,6 @@
+# Jupyter + LangChain examples for teoria gateway (install in a venv or use: uv pip install -r notebooks/requirements.txt)
+jupyter>=1.0.0
+ipykernel>=6.29.0
+langchain-core>=0.3.0
+langchain-openai>=0.3.0
+httpx>=0.28.0

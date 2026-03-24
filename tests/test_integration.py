@@ -13,7 +13,7 @@ class TestGatewayHealth:
         assert r.status_code == 200
         body = r.json()
         assert body["status"] == "healthy"
-        assert body["vllm"] is True
+        assert body["backend"] is True
 
     def test_health_through_nginx(self, client, nginx_url):
         r = client.get(f"{nginx_url}/health")
@@ -27,7 +27,9 @@ class TestGatewayAuth:
             "messages": [{"role": "user", "content": "hi"}],
         })
         assert r.status_code == 401
-        assert r.json()["error"] == "unauthorized"
+        err = r.json()["error"]
+        assert err["type"] == "authentication_error"
+        assert err["code"] == "invalid_api_key"
 
     def test_wrong_api_key_returns_401(self, client, gateway_url):
         r = client.post(
@@ -36,6 +38,7 @@ class TestGatewayAuth:
             headers={"x-api-key": "wrong-key"},
         )
         assert r.status_code == 401
+        assert r.json()["error"]["type"] == "authentication_error"
 
     def test_bearer_token_auth(self, client, gateway_url, api_key):
         r = client.post(
@@ -54,6 +57,32 @@ class TestGatewayAuth:
         assert r.status_code == 200
 
 
+class TestGatewayModels:
+    def test_list_models_returns_200(self, client, gateway_url, authed_headers):
+        r = client.get(f"{gateway_url}/v1/models", headers=authed_headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["object"] == "list"
+        assert len(body["data"]) > 0
+
+    def test_model_id_matches_chat_completions(self, client, gateway_url, authed_headers):
+        r = client.get(f"{gateway_url}/v1/models", headers=authed_headers)
+        assert r.status_code == 200
+        ids = [m["id"] for m in r.json()["data"]]
+        chat_r = client.post(
+            f"{gateway_url}/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], "max_tokens": 8},
+            headers=authed_headers,
+        )
+        assert chat_r.status_code == 200
+        response_model = chat_r.json().get("model", "")
+        assert response_model in ids, f"model '{response_model}' not in /v1/models: {ids}"
+
+    def test_list_models_requires_auth(self, client, gateway_url):
+        r = client.get(f"{gateway_url}/v1/models")
+        assert r.status_code == 401
+
+
 class TestGatewayValidation:
     def test_max_tokens_exceeds_limit(self, client, gateway_url, authed_headers):
         r = client.post(
@@ -65,7 +94,9 @@ class TestGatewayValidation:
             headers=authed_headers,
         )
         assert r.status_code == 400
-        assert "limit" in r.json()["error"]
+        err = r.json()["error"]
+        assert err["type"] == "invalid_request_error"
+        assert "limit" in err["message"]
 
     def test_max_tokens_within_limit(self, client, gateway_url, authed_headers):
         r = client.post(

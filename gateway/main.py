@@ -1,7 +1,12 @@
 import os
 import asyncio
+import hashlib
+import json
+import threading
 from contextlib import asynccontextmanager
+
 import httpx
+from cachetools import TTLCache
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -18,9 +23,17 @@ MAX_INPUT_TOKENS = int(os.getenv("MAX_INPUT_TOKENS", "8000"))
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "2000"))
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT_REQUESTS", "64"))
 
+CACHE_ENABLED = os.getenv("CACHE_ENABLED", "true").lower() == "true"
+CACHE_MAX_ENTRIES = int(os.getenv("CACHE_MAX_ENTRIES", "2048"))
+CACHE_TTL = int(os.getenv("CACHE_TTL", "3600"))
+
 _semaphore: asyncio.Semaphore
 _http: httpx.AsyncClient
+_cache: TTLCache
+_cache_lock: threading.Lock
 tracer = trace.get_tracer(__name__)
+
+_CACHE_KEY_FIELDS = ("messages", "model", "max_tokens", "temperature", "top_p", "stop")
 
 
 def _init_telemetry() -> None:
@@ -34,10 +47,12 @@ def _init_telemetry() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _semaphore, _http
+    global _semaphore, _http, _cache, _cache_lock
     _init_telemetry()
     _semaphore = asyncio.Semaphore(MAX_CONCURRENT)
     _http = httpx.AsyncClient(base_url=LLM_BACKEND_URL, timeout=httpx.Timeout(300.0, connect=10.0))
+    _cache = TTLCache(maxsize=CACHE_MAX_ENTRIES, ttl=CACHE_TTL)
+    _cache_lock = threading.Lock()
     yield
     await _http.aclose()
 
@@ -46,13 +61,27 @@ app = FastAPI(title="teoria-engine gateway", lifespan=lifespan)
 FastAPIInstrumentor.instrument_app(app)
 
 
+def _openai_error(
+    message: str,
+    *,
+    type_: str = "invalid_request_error",
+    code: str | None = None,
+    status: int = 400,
+) -> JSONResponse:
+    """Return an OpenAI-shaped error envelope so SDK/LangChain error parsers work."""
+    return JSONResponse(
+        {"error": {"message": message, "type": type_, "code": code}},
+        status_code=status,
+    )
+
+
 @app.middleware("http")
 async def authenticate(request: Request, call_next):
     if request.url.path in ("/health", "/docs", "/openapi.json"):
         return await call_next(request)
     key = request.headers.get("x-api-key") or request.headers.get("authorization", "").removeprefix("Bearer ")
     if key != API_KEY:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return _openai_error("Invalid API key.", type_="authentication_error", code="invalid_api_key", status=401)
     return await call_next(request)
 
 
@@ -68,6 +97,31 @@ def _resolve_model(payload: dict) -> dict:
     out = dict(payload)
     out["model"] = LLM_MODEL or payload.get("model") or ""
     return out
+
+
+def _cache_key(payload: dict) -> str:
+    """SHA-256 of the normalized payload fields that affect LLM output."""
+    canonical = {k: payload.get(k) for k in _CACHE_KEY_FIELDS if payload.get(k) is not None}
+    raw = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _is_deterministic(payload: dict) -> bool:
+    return float(payload.get("temperature", 1.0)) == 0
+
+
+def _cache_get(key: str) -> dict | None:
+    if not CACHE_ENABLED:
+        return None
+    with _cache_lock:
+        return _cache.get(key)
+
+
+def _cache_put(key: str, value: dict) -> None:
+    if not CACHE_ENABLED:
+        return
+    with _cache_lock:
+        _cache[key] = value
 
 
 class ChatRequest(BaseModel):
@@ -107,32 +161,55 @@ async def api_chat(payload: ChatRequest):
     Proxies to vLLM OpenAI-compatible endpoint.
     """
     if err := _validate_payload(payload.model_dump()):
-        return JSONResponse({"error": err}, status_code=400)
+        return _openai_error(err)
 
     llm_payload = _chat_request_to_openai(payload)
+
+    if _is_deterministic(llm_payload):
+        key = _cache_key(llm_payload)
+        cached = _cache_get(key)
+        if cached is not None:
+            return JSONResponse(cached, headers={"X-Cache": "HIT"})
+    else:
+        key = None
 
     async with _semaphore:
         with tracer.start_as_current_span("llm_request"):
             if payload.stream:
                 return await _stream_response(llm_payload)
             resp = await _http.post("/v1/chat/completions", json=llm_payload)
-            return JSONResponse(resp.json(), status_code=resp.status_code)
+            body = resp.json()
+            if key is not None and resp.status_code == 200:
+                _cache_put(key, body)
+            return JSONResponse(body, status_code=resp.status_code, headers={"X-Cache": "MISS"} if key is not None else {})
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     payload = await request.json()
     if err := _validate_payload(payload):
-        return JSONResponse({"error": err}, status_code=400)
+        return _openai_error(err)
 
     llm_payload = _resolve_model(payload)
+
+    if _is_deterministic(llm_payload):
+        key = _cache_key(llm_payload)
+        cached = _cache_get(key)
+        if cached is not None:
+            return JSONResponse(cached, headers={"X-Cache": "HIT"})
+    else:
+        key = None
+
     async with _semaphore:
         with tracer.start_as_current_span("llm_request"):
             stream = llm_payload.get("stream", False)
             if stream:
                 return await _stream_response(llm_payload)
             resp = await _http.post("/v1/chat/completions", json=llm_payload)
-            return JSONResponse(resp.json(), status_code=resp.status_code)
+            body = resp.json()
+            if key is not None and resp.status_code == 200:
+                _cache_put(key, body)
+            return JSONResponse(body, status_code=resp.status_code, headers={"X-Cache": "MISS"} if key is not None else {})
 
 
 async def _stream_response(payload: dict) -> StreamingResponse:
@@ -155,13 +232,32 @@ async def chat_simple(request: Request):
     """Convenience alias matching the architecture doc."""
     payload = await request.json()
     if err := _validate_payload(payload):
-        return JSONResponse({"error": err}, status_code=400)
+        return _openai_error(err)
 
     llm_payload = _resolve_model(payload)
+
+    if _is_deterministic(llm_payload):
+        key = _cache_key(llm_payload)
+        cached = _cache_get(key)
+        if cached is not None:
+            return JSONResponse(cached, headers={"X-Cache": "HIT"})
+    else:
+        key = None
+
     async with _semaphore:
         with tracer.start_as_current_span("llm_request"):
             resp = await _http.post("/v1/chat/completions", json=llm_payload)
-            return JSONResponse(resp.json(), status_code=resp.status_code)
+            body = resp.json()
+            if key is not None and resp.status_code == 200:
+                _cache_put(key, body)
+            return JSONResponse(body, status_code=resp.status_code, headers={"X-Cache": "MISS"} if key is not None else {})
+
+
+@app.get("/v1/models")
+async def list_models():
+    """Proxy GET /v1/models to the backend so OpenAI SDK and LangChain model-list calls work."""
+    resp = await _http.get("/v1/models")
+    return JSONResponse(resp.json(), status_code=resp.status_code)
 
 
 @app.get("/health")
