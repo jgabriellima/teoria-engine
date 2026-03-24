@@ -9,11 +9,94 @@ Usage (sourced by teoria-engine):
 
 import sys
 import os
+import pathlib
 
 try:
     import yaml
 except ImportError:
     sys.exit("pyyaml is required: uv pip install pyyaml")
+
+
+# ---------------------------------------------------------------------------
+# Local path resolution helpers
+# ---------------------------------------------------------------------------
+
+# Default LM Studio model cache locations per platform
+_LM_STUDIO_DEFAULTS = {
+    "Darwin": pathlib.Path.home() / ".lmstudio" / "models",
+    "Linux":  pathlib.Path.home() / ".cache" / "lm-studio" / "models",
+}
+
+
+def _expand(raw: str) -> pathlib.Path:
+    """Expand ~ and env vars, return absolute Path."""
+    return pathlib.Path(os.path.expandvars(os.path.expanduser(raw))).resolve()
+
+
+def _resolve_local_models_dir(cfg: dict) -> pathlib.Path | None:
+    """
+    Return the resolved local_models_dir, or None when not configured.
+    Falls back to the LM Studio default path when it exists on disk.
+    """
+    raw = cfg.get("local_models_dir")
+    if raw:
+        p = _expand(str(raw))
+        if not p.exists():
+            print(
+                f"[warn] local_models_dir '{p}' does not exist — ignoring",
+                file=sys.stderr,
+            )
+            return None
+        return p
+
+    # Auto-detect LM Studio default
+    import platform
+    default = _LM_STUDIO_DEFAULTS.get(platform.system())
+    if default and default.exists():
+        print(
+            f"[info] auto-detected LM Studio model cache: {default}",
+            file=sys.stderr,
+        )
+        return default
+
+    return None
+
+
+def _resolve_model_local_path(
+    model: dict,
+    base_dir: pathlib.Path | None,
+    field: str,
+) -> pathlib.Path | None:
+    """
+    Resolve a model-level local path field (local_path or local_mlx_path).
+    Returns the absolute host path, or None if not configured / not found.
+    """
+    raw = model.get(field)
+    if not raw:
+        return None
+
+    raw_path = pathlib.Path(str(raw))
+
+    # Absolute path → use as-is
+    if raw_path.is_absolute():
+        p = raw_path.resolve()
+    elif base_dir:
+        p = (base_dir / raw_path).resolve()
+    else:
+        print(
+            f"[warn] {field} '{raw}' is relative but local_models_dir is not set — ignoring",
+            file=sys.stderr,
+        )
+        return None
+
+    if not p.exists():
+        print(
+            f"[warn] {field} path '{p}' does not exist on disk — falling back to HuggingFace",
+            file=sys.stderr,
+        )
+        return None
+
+    return p
 
 
 def load(config_path: str, model_override: str | None = None) -> dict[str, str]:
@@ -35,8 +118,42 @@ def load(config_path: str, model_override: str | None = None) -> dict[str, str]:
     obs = cfg.get("observability", {})
     mlx_cfg = cfg.get("mlx", {})
 
-    # --- vLLM flags ---
-    vllm_flags = [f"--model {model['hf_name']}"]
+    # -------------------------------------------------------------------------
+    # Local model path resolution
+    # -------------------------------------------------------------------------
+    local_models_dir = _resolve_local_models_dir(cfg)
+
+    # vLLM: local_path (must be HF SafeTensors format, GGUF not supported by vLLM)
+    vllm_local = _resolve_model_local_path(model, local_models_dir, "local_path")
+
+    # MLX: local_mlx_path (supports HF format and GGUF files)
+    mlx_local = _resolve_model_local_path(model, local_models_dir, "local_mlx_path")
+
+    # The model identifier passed to vLLM: local container path takes priority
+    # Container-side path is /models/local/<relative_path_within_local_models_dir>
+    if vllm_local and local_models_dir:
+        try:
+            rel = vllm_local.relative_to(local_models_dir)
+            vllm_model_arg = f"/models/local/{rel}"
+        except ValueError:
+            # Absolute path outside local_models_dir — can't bind-mount reliably
+            print(
+                f"[warn] local_path '{vllm_local}' is not under local_models_dir '{local_models_dir}' "
+                "— using HuggingFace name instead",
+                file=sys.stderr,
+            )
+            vllm_local = None
+            vllm_model_arg = model["hf_name"]
+    else:
+        vllm_model_arg = model["hf_name"]
+
+    # MLX model: local host path takes priority over HF name
+    mlx_model_resolved = str(mlx_local) if mlx_local else model.get("mlx_name", "")
+
+    # -------------------------------------------------------------------------
+    # vLLM command construction
+    # -------------------------------------------------------------------------
+    vllm_flags = [f"--model {vllm_model_arg}"]
     if model.get("trust_remote_code", False):
         vllm_flags.append("--trust-remote-code")
     vllm_flags.append(f"--gpu-memory-utilization {model.get('gpu_memory_utilization', 0.95)}")
@@ -59,10 +176,10 @@ def load(config_path: str, model_override: str | None = None) -> dict[str, str]:
     if extra:
         vllm_flags.append(extra)
 
-    env = {
+    env: dict[str, str] = {
         "ACTIVE_MODEL": active,
         # vLLM
-        "VLLM_MODEL": model["hf_name"],
+        "VLLM_MODEL": vllm_model_arg,
         "VLLM_COMMAND": " ".join(vllm_flags),
         "VLLM_GPU_MEMORY_UTILIZATION": str(model.get("gpu_memory_utilization", 0.95)),
         "VLLM_MAX_MODEL_LEN": str(model.get("max_model_len", 131072)),
@@ -71,7 +188,7 @@ def load(config_path: str, model_override: str | None = None) -> dict[str, str]:
         "VLLM_ENABLE_PREFIX_CACHING": str(model.get("prefix_caching", True)).lower(),
         "VLLM_ENABLE_CHUNKED_PREFILL": str(model.get("chunked_prefill", True)).lower(),
         # MLX
-        "MLX_MODEL": model.get("mlx_name", ""),
+        "MLX_MODEL": mlx_model_resolved,
         "MLX_PORT": str(mlx_cfg.get("port", 8000)),
         "MLX_HOST": mlx_cfg.get("host", "0.0.0.0"),
         # Gateway
@@ -84,6 +201,13 @@ def load(config_path: str, model_override: str | None = None) -> dict[str, str]:
         "GATEWAY_CACHE_TTL": str(gw_cache.get("ttl_seconds", 3600)),
         "OTEL_ENDPOINT": obs.get("otel_endpoint", "http://otel-collector:4317"),
         "OTEL_SERVICE_NAME": obs.get("service_name", "teoria-engine"),
+        # Local model paths (empty string when not used)
+        "LOCAL_MODELS_DIR": str(local_models_dir) if local_models_dir else "",
+        "VLLM_LOCAL_PATH": str(vllm_local) if vllm_local else "",
+        "MLX_LOCAL_PATH": str(mlx_local) if mlx_local else "",
+        # Offline mode: prevent accidental HF downloads when using local paths
+        "HF_HUB_OFFLINE": "1" if (vllm_local or mlx_local) else "0",
+        "TRANSFORMERS_OFFLINE": "1" if (vllm_local or mlx_local) else "0",
     }
     return env
 

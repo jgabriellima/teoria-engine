@@ -6,6 +6,30 @@
 active_model: nemotron
 
 # ---------------------------------------------------------------------------
+# Local models directory (optional)
+#
+# Point to a directory where models are already downloaded to avoid
+# re-downloading from HuggingFace. Compatible with LM Studio's model cache.
+#
+# Default LM Studio paths:
+#   Linux : ~/.cache/lm-studio/models
+#   macOS : ~/.lmstudio/models
+#
+# How it works:
+#   - vLLM (Linux): the directory is bind-mounted into the container at
+#     /models/local. Set local_path (relative to this dir) on each model
+#     profile. MUST be HuggingFace SafeTensors format (not GGUF).
+#
+#   - MLX (macOS): mlx_lm.server receives the resolved host path directly.
+#     Supports both HuggingFace format and GGUF files.
+#
+# Set the path here, then add local_path / local_mlx_path to each model
+# profile below. Leave commented to always pull from HuggingFace.
+#
+# local_models_dir: ~/.cache/lm-studio/models
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # Model profiles
 #
 # Each profile defines:
@@ -31,6 +55,10 @@ models:
   nemotron:
     hf_name: nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16
     mlx_name: mlx-community/Mistral-NeMo-Minitron-8B-Instruct-4bit
+    # Optional: path relative to local_models_dir (or absolute).
+    # vLLM uses local_path (SafeTensors required). MLX uses local_mlx_path (GGUF ok).
+    # local_path: nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16
+    # local_mlx_path: lmstudio-community/Mistral-Nemo-Instruct-2407-GGUF/Mistral-Nemo-Instruct-2407.Q4_K_M.gguf
     trust_remote_code: true
     max_model_len: 131072
     gpu_memory_utilization: 0.95
@@ -46,6 +74,8 @@ models:
   qwen-0.5b:
     hf_name: Qwen/Qwen2.5-0.5B-Instruct
     mlx_name: mlx-community/Qwen2.5-0.5B-Instruct-4bit
+    # local_path: Qwen/Qwen2.5-0.5B-Instruct
+    # local_mlx_path: lmstudio-community/Qwen2.5-0.5B-Instruct-GGUF/Qwen2.5-0.5B-Instruct-Q8_0.gguf
     max_model_len: 4096
     gpu_memory_utilization: 0.50
     max_num_seqs: 64
@@ -74,6 +104,8 @@ models:
   qwen3-vl-8b:
     hf_name: unsloth/Qwen3-VL-8B-Instruct-unsloth-bnb-4bit
     mlx_name: mlx-community/Qwen3-VL-8B-Instruct-4bit
+    # local_path: unsloth/Qwen3-VL-8B-Instruct-unsloth-bnb-4bit
+    # local_mlx_path: lmstudio-community/Qwen3-VL-8B-Instruct-GGUF/Qwen3-VL-8B-Instruct-Q4_K_M.gguf
     trust_remote_code: true
     max_model_len: 4096
     gpu_memory_utilization: 0.82

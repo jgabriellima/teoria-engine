@@ -7,8 +7,18 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=${VLLM_GPU_DEVICE:-0}
       - HUGGING_FACE_HUB_TOKEN=${HUGGINGFACE_TOKEN:-}
+      # Offline mode: set by load-config when a local_path is configured for the
+      # active model. Prevents vLLM from attempting HuggingFace network calls.
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-0}
     volumes:
       - huggingface-cache:/root/.cache/huggingface
+      # Local models directory (bind-mount from host).
+      # When LOCAL_MODELS_DIR is set, the directory is mounted read-only at
+      # /models/local inside the container. VLLM_COMMAND references this path
+      # when local_path is configured for the active model profile.
+      # When LOCAL_MODELS_DIR is empty, /tmp is mounted harmlessly instead.
+      - ${LOCAL_MODELS_DIR:-/tmp}:/models/local:ro
     command: ${VLLM_COMMAND:- --model nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16 --trust-remote-code --gpu-memory-utilization 0.95 --max-model-len 131072 --max-num-seqs 256 --max-num-batched-tokens 8192 --enable-prefix-caching --enable-chunked-prefill}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
