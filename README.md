@@ -2,6 +2,8 @@
 
 Production-grade LLM inference stack. Runs on Linux with NVIDIA GPUs (via vLLM) or macOS Apple Silicon (via MLX). Orchestrates the LLM backend, a FastAPI gateway, NGINX reverse proxy, and optional Cloudflare tunnel — all managed through a single CLI.
 
+Exposes an **OpenAI-compatible API** that any agent platform (Claude Code, Codex CLI, Cursor, Gemini CLI, OpenHands, LangChain, etc.) can use as a drop-in local LLM endpoint.
+
 Default model: **nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16**.
 
 ### Available Model Profiles
@@ -115,6 +117,8 @@ VLLM_GPU_DEVICE=0
 |---|---|
 | `hf_name` | HuggingFace model ID used by vLLM (Linux + NVIDIA) |
 | `mlx_name` | HuggingFace model ID used by MLX (macOS Apple Silicon) |
+| `local_path` | Path to a local model directory for vLLM — relative to `local_models_dir` or absolute. Must be HuggingFace SafeTensors format. |
+| `local_mlx_path` | Path to a local model for MLX — relative to `local_models_dir` or absolute. Supports both SafeTensors and GGUF. |
 | `trust_remote_code` | Pass `--trust-remote-code` to vLLM |
 | `max_model_len` | Maximum context length (tokens) |
 | `gpu_memory_utilization` | Fraction of VRAM reserved for KV cache |
@@ -148,6 +152,48 @@ models:
 ```
 
 This means the `gateway:` top-level block is just the baseline — models that need tighter or looser limits declare it in their own profile, and the running stack enforces it automatically.
+
+#### Local models directory (LM Studio / pre-downloaded)
+
+Point the stack at models already on disk — no re-download needed. Compatible with LM Studio's model cache.
+
+```yaml
+# config/engine.yml
+
+# Base directory where models are stored on the host.
+# Auto-detected if left unset and the LM Studio default path exists.
+local_models_dir: ~/.cache/lm-studio/models   # Linux default
+# local_models_dir: ~/.lmstudio/models        # macOS default
+
+models:
+  qwen-0.5b:
+    hf_name: Qwen/Qwen2.5-0.5B-Instruct
+    mlx_name: mlx-community/Qwen2.5-0.5B-Instruct-4bit
+    # vLLM: path relative to local_models_dir (SafeTensors format required, not GGUF)
+    local_path: Qwen/Qwen2.5-0.5B-Instruct
+    # MLX: supports both SafeTensors and GGUF
+    local_mlx_path: lmstudio-community/Qwen2.5-0.5B-Instruct-GGUF/Qwen2.5-0.5B-Instruct-Q8_0.gguf
+```
+
+**How it works:**
+
+| Backend | Mechanism |
+|---|---|
+| vLLM (Linux) | `local_models_dir` is bind-mounted read-only into the container at `/models/local`. vLLM receives `--model /models/local/<local_path>`. `HF_HUB_OFFLINE=1` prevents accidental downloads. |
+| MLX (macOS) | `mlx_lm.server` receives the resolved absolute host path directly. No container involved. |
+
+**Auto-detection:** If `local_models_dir` is not set, `bin/load-config` checks for the LM Studio default paths (`~/.cache/lm-studio/models` on Linux, `~/.lmstudio/models` on macOS) and uses them automatically when they exist.
+
+**`.env.compose` (auto-generated):** Every `teoria-engine up`, `config`, or `preflight` call regenerates `.env.compose` with the resolved paths and flags. This file is passed to `docker compose` as a second `--env-file`, ensuring the compose runtime always has the correct `LOCAL_MODELS_DIR`, `VLLM_COMMAND`, and `HF_HUB_OFFLINE` values — even when `docker compose` is invoked directly without going through `bin/teoria-engine`. It is gitignored and should never be edited manually.
+
+Verify what was detected:
+
+```bash
+teoria-engine preflight      # shows local_models_dir, file count, and per-model paths
+teoria-engine config         # shows resolved model source (LOCAL vs HuggingFace)
+```
+
+> **vLLM format constraint:** vLLM requires HuggingFace SafeTensors format. GGUF files (common in LM Studio) are **not** supported by vLLM. Use `local_mlx_path` for GGUF models on macOS (MLX handles them natively). For Linux/vLLM, you need the SafeTensors version of the model.
 
 #### Example: full profile reference
 
@@ -451,17 +497,67 @@ sudo teoria-engine service      # install + enable + start
 sudo teoria-engine unservice    # stop + disable + remove
 ```
 
+## Agent Skill
+
+teoria-engine ships as an [Agent Skill](https://agentskills.io) — a portable, installable capability that any compatible agent (Claude Code, OpenAI Codex CLI, Cursor, Gemini CLI, OpenHands, GitHub Copilot, and others) can discover and use to start, call, and stop a local LLM endpoint.
+
+The skill lives at `teoria-engine/` in this repository.
+
+### What the skill enables
+
+Any agent that loads this skill can:
+
+1. **Start** the engine on the user's machine (auto-detects vLLM vs MLX)
+2. **Call** the OpenAI-compatible API for inference tasks
+3. **Stop** the engine cleanly when done
+
+### Quick integration — point any agent at the running gateway
+
+```bash
+export OPENAI_BASE_URL="http://localhost:9000/v1"
+export OPENAI_API_KEY="$GATEWAY_API_KEY"
+```
+
+| Platform | Config |
+|---|---|
+| **Claude Code** | `OPENAI_BASE_URL=http://localhost:9000/v1 claude` |
+| **Codex CLI** | `OPENAI_BASE_URL=http://localhost:9000/v1 codex ...` |
+| **Cursor** | Settings → AI → OpenAI Base URL → `http://localhost:9000/v1` |
+| **Gemini CLI** | `OPENAI_BASE_URL=http://localhost:9000/v1 gemini ...` |
+| **OpenHands** | LLM config → Provider: OpenAI → Base URL: `http://localhost:9000/v1` |
+| **Aider** | `aider --openai-api-base http://localhost:9000/v1 --openai-api-key $KEY` |
+| **LangChain** | `ChatOpenAI(base_url="http://localhost:9000/v1", api_key=key)` |
+
+Full per-platform instructions: [`teoria-engine/references/PLATFORMS.md`](teoria-engine/references/PLATFORMS.md)
+
+### Skill structure
+
+```
+teoria-engine/
+├── SKILL.md                        # skill definition (agentskills.io spec)
+├── scripts/
+│   ├── start.sh                    # idempotent start with health wait
+│   ├── stop.sh                     # graceful stop
+│   └── status.sh                   # health + endpoints + containers
+├── references/
+│   ├── REFERENCE.md                # full API + config reference
+│   └── PLATFORMS.md                # per-platform agent integration
+└── assets/
+    ├── openai_client.py            # Python client example (sync, streaming, tools, VL)
+    └── env.example                 # env template
+```
+
 ## Project Structure
 
 ```
 ├── bin/
 │   ├── teoria-engine        # main CLI (manages vLLM or MLX based on platform)
-│   ├── load-config          # YAML → shell env parser (merges model-level gateway overrides)
+│   ├── load-config          # YAML → shell env parser + local path resolver
 │   └── setup-tunnel         # Cloudflare tunnel one-time provisioning
 ├── config/
-│   └── engine.yml           # single source of truth: model profiles + gateway + observability
+│   └── engine.yml           # single source of truth: model profiles + gateway + local paths
 ├── gateway/
-│   ├── main.py              # FastAPI gateway (auth, streaming, telemetry)
+│   ├── main.py              # FastAPI gateway (auth, caching, streaming, telemetry)
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── nginx/
@@ -475,6 +571,11 @@ sudo teoria-engine unservice    # stop + disable + remove
 │   └── teoria-engine.service
 ├── scripts/
 │   └── install.sh           # one-line installer (Linux + macOS)
+├── teoria-engine/           # Agent Skill (agentskills.io) — installable by any compatible agent
+│   ├── SKILL.md
+│   ├── scripts/             # start.sh / stop.sh / status.sh
+│   ├── references/          # REFERENCE.md / PLATFORMS.md
+│   └── assets/              # openai_client.py / env.example
 ├── tests/
 │   ├── mock_vllm/           # lightweight mock for CI
 │   ├── test_integration.py
@@ -484,6 +585,7 @@ sudo teoria-engine unservice    # stop + disable + remove
 ├── docker-compose.test.yml
 ├── Makefile
 ├── .env.example
+├── .env.compose             # auto-generated by teoria-engine (gitignored)
 └── docs/
     ├── architecture.md
     ├── tunnel-deploy.md
